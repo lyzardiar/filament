@@ -18,10 +18,13 @@
 #include <image/ImageOps.h>
 
 #include <math/vec3.h>
+#include <math/vec4.h>
 #include <utils/Panic.h>
+#include <utils/CString.h>
 
 #include <memory>
 #include <vector>
+#include <unordered_map>
 
 using namespace image;
 
@@ -202,12 +205,22 @@ FilterFunction createFilterFunction(Filter ftype) {
     return fn;
 }
 
-void normalize(LinearImage& image) {
-    ASSERT_PRECONDITION(image.getChannels() == 3, "Must be a 3-channel image.");
+template <class VecT>
+void normalizeImpl(LinearImage& image) {
     const uint32_t width = image.getWidth(), height = image.getHeight();
-    auto vecs = (math::float3*) image.getPixelRef();
+    auto vecs = (VecT*) image.getPixelRef();
     for (uint32_t n = 0; n < width * height; ++n) {
         vecs[n] = normalize(vecs[n]);
+    }
+}
+
+void normalize(LinearImage& image) {
+    ASSERT_PRECONDITION(image.getChannels() == 3 || image.getChannels() == 4,
+                        "Must be a 3 or 4 channel image");
+    if (image.getChannels() == 3) {
+      normalizeImpl< filament::math::float3>(image);
+    } else {
+      normalizeImpl< filament::math::float4>(image);
     }
 }
 
@@ -318,6 +331,50 @@ void computeSingleSample(const LinearImage& source, float x, float y, SingleSamp
     for (uint32_t c = 0; c < source.getChannels(); ++c) {
         dst[c] = src[c];
     }
+}
+
+// Unlike traditional mipmap generation, our implementation generates all levels from the original
+// image, under the premise that this produces a higher quality result.
+void generateMipmaps(const LinearImage& source, Filter filter, LinearImage* result, uint32_t mips) {
+    mips = std::min(mips, getMipmapCount(source));
+    uint32_t width = source.getWidth();
+    uint32_t height = source.getHeight();
+    for (uint32_t n = 0; n < mips; ++n) {
+       width = std::max(width >> 1, 1u);
+       height = std::max(height >> 1, 1u);
+       result[n] = resampleImage(source, width, height, filter);
+    }
+}
+
+uint32_t getMipmapCount(const LinearImage& source) {
+    uint32_t width = source.getWidth();
+    uint32_t height = source.getHeight();
+    uint32_t count = 0;
+    while (width > 1 || height > 1) {
+        ++count;
+        width = std::max(width >> 1, 1u);
+        height = std::max(height >> 1, 1u);
+    }
+    return count;
+}
+
+Filter filterFromString(const char* rawname) {
+    using namespace utils;
+    using namespace std;
+    static const unordered_map<StaticString, Filter> map = {
+        { "BOX", Filter::BOX},
+        { "NEAREST", Filter::NEAREST},
+        { "HERMITE", Filter::HERMITE},
+        { "GAUSSIAN", Filter::GAUSSIAN_SCALARS},
+        { "NORMALS", Filter::GAUSSIAN_NORMALS},
+        { "MITCHELL", Filter::MITCHELL},
+        { "LANCZOS", Filter::LANCZOS},
+        { "MINIMUM", Filter::MINIMUM},
+    };
+    string name = rawname;
+    for (auto& c: name) { c = toupper((unsigned char)c); }
+    auto iter = map.find(StaticString::make(name.c_str(), name.size()));
+    return iter == map.end() ? Filter::DEFAULT : iter->second;
 }
 
 } // namespace image

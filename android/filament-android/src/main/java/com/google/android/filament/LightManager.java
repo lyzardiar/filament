@@ -53,6 +53,9 @@ public class LightManager {
         public float constantBias = 0.05f;
         public float normalBias = 0.4f;
         public float shadowFar = 0.0f;
+        public float shadowNearHint = 1.0f;
+        public float shadowFarHint = 100.0f;
+        public boolean stable = true;
     }
 
     public static final float EFFICIENCY_INCANDESCENT = 0.0220f;
@@ -79,7 +82,8 @@ public class LightManager {
         @NonNull
         public Builder shadowOptions(@NonNull ShadowOptions options) {
             nBuilderShadowOptions(mNativeBuilder,
-                    options.mapSize, options.constantBias, options.normalBias, options.shadowFar);
+                    options.mapSize, options.constantBias, options.normalBias, options.shadowFar,
+                    options.shadowNearHint, options.shadowFarHint, options.stable);
             return this;
         }
 
@@ -170,6 +174,11 @@ public class LightManager {
             }
 
         }
+    }
+
+    @NonNull
+    public Type getType(@EntityInstance int i) {
+        return Type.values()[nGetType(mNativeObject, i)];
     }
 
     public void setPosition(@EntityInstance int i, float x, float y, float z) {
@@ -270,7 +279,7 @@ public class LightManager {
     private static native void nDestroyBuilder(long nativeBuilder);
     private static native boolean nBuilderBuild(long nativeBuilder, long nativeEngine, int entity);
     private static native void nBuilderCastShadows(long nativeBuilder, boolean enable);
-    private static native void nBuilderShadowOptions(long nativeBuilder, int mapSize, float constantBias, float normalBias, float shadowFar);
+    private static native void nBuilderShadowOptions(long nativeBuilder, int mapSize, float constantBias, float normalBias, float shadowFar, float shadowNearHint, float shadowFarhint, boolean stable);
     private static native void nBuilderCastLight(long nativeBuilder, boolean enabled);
     private static native void nBuilderPosition(long nativeBuilder, float x, float y, float z);
     private static native void nBuilderDirection(long nativeBuilder, float x, float y, float z);
@@ -283,6 +292,8 @@ public class LightManager {
     private static native void nBuilderHaloSize(long nativeBuilder, float haloSize);
     private static native void nBuilderHaloFalloff(long nativeBuilder, float haloFalloff);
 
+
+    private static native int nGetType(long nativeLightManager, int i);
     private static native void nSetPosition(long nativeLightManager, int i, float x, float y, float z);
     private static native void nGetPosition(long nativeLightManager, int i, float[] out);
     private static native void nSetDirection(long nativeLightManager, int i, float x, float y, float z);

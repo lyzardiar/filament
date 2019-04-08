@@ -39,7 +39,7 @@
 
 using std::string;
 using utils::Path;
-using namespace math;
+using namespace filament::math;
 
 using namespace image;
 
@@ -100,12 +100,12 @@ static void processEnvMap(string inputPath, string resultPath, string goldenPath
     std::cout << "Reading result image from " << resultPath << std::endl;
     checkFileExistence(resultPath);
     std::ifstream resultStream(resultPath.c_str(), std::ios::binary);
-    Image resultImage = ImageDecoder::decode(resultStream, resultPath);
+    LinearImage resultImage = ImageDecoder::decode(resultStream, resultPath);
     ASSERT_EQ(resultImage.isValid(), true);
-    ASSERT_EQ(resultImage.getChannelsCount(), 4);
+    ASSERT_EQ(resultImage.getChannels(), 4);
     LinearImage resultLImage = toLinearFromRGBM(
-            static_cast<math::float4 const*>(resultImage.getData()),
-            (uint32_t) resultImage.getWidth(), (uint32_t) resultImage.getHeight());
+            reinterpret_cast<filament::math::float4 const*>(resultImage.getPixelRef()),
+            resultImage.getWidth(), resultImage.getHeight());
 
     std::cout << "Golden image is at " << goldenPath << std::endl;
     updateOrCompare(resultLImage, goldenPath, g_comparisonMode, 0.01f);
@@ -128,7 +128,7 @@ TEST_F(CmgenTest, SphericalHarmonics) { // NOLINT
     string content = readFile(resultPath);
     string vec3(R"(\(\s+([-+0-9.]+),\s+([-+0-9.]+),\s+([-+0-9.]+)\); // )");
 
-    compareSh(content, vec3 + "L00",  float3{3.14159265f});
+    compareSh(content, vec3 + "L00",  float3{1.0f});
     compareSh(content, vec3 + "L1-1", float3{0.0f});
     compareSh(content, vec3 + "L10",  float3{0.0f});
     compareSh(content, vec3 + "L11",  float3{0.0f});
@@ -142,7 +142,7 @@ TEST_F(CmgenTest, SphericalHarmonics) { // NOLINT
 TEST_F(CmgenTest, HdrLatLong) { // NOLINT
     const string inputPath = "assets/environments/white_furnace/white_furnace.exr";
     const string resultPath = "white_furnace/nx.rgbm";
-    const string goldenPath = "samples/envs/white_furnace/nx.rgbm";
+    const string goldenPath = "tools/cmgen/tests/white_furnace_nx.rgbm";
     processEnvMap(inputPath, resultPath, goldenPath);
 }
 

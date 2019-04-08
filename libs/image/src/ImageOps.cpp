@@ -17,11 +17,14 @@
 #include <image/ImageOps.h>
 
 #include <math/vec3.h>
+#include <math/vec4.h>
 #include <utils/Panic.h>
 
 #include <algorithm>
+#include <memory>
+#include <ratio>
 
-using namespace math;
+using namespace filament::math;
 
 namespace image {
 
@@ -116,14 +119,44 @@ LinearImage verticalFlip(const LinearImage& image) {
     return result;
 }
 
-LinearImage vectorsToColors(const LinearImage& image) {
-    ASSERT_PRECONDITION(image.getChannels() == 3, "Must be a 3-channel image.");
+template<class VecT>
+LinearImage applyScaleOffset(const LinearImage& image,
+        typename VecT::value_type scale, typename VecT::value_type offset) {
     const uint32_t width = image.getWidth(), height = image.getHeight();
-    LinearImage result(width, height, 3);
-    auto src = (float3 const*) image.getPixelRef();
-    auto dst = (float3*) result.getPixelRef();
-    for (uint32_t n = 0; n < width * height; ++n) {
-        dst[n] = 0.5f * (src[n] + float3(1));
+    LinearImage result(width, height, image.getChannels());
+    auto src = (VecT const*) image.getPixelRef();
+    auto dst = (VecT*) result.getPixelRef();
+    for (uint32_t n = 0, end = width * height; n < end; ++n) {
+        dst[n] = scale * src[n] + VecT{offset};
+    }
+    return result;
+}
+
+LinearImage vectorsToColors(const LinearImage& image) {
+    ASSERT_PRECONDITION(image.getChannels() == 3 || image.getChannels() == 4,
+                        "Must be a 3 or 4 channel image");
+    return image.getChannels() == 3
+        ? applyScaleOffset<float3>(image, 0.5f, 0.5f)
+        : applyScaleOffset<float4>(image, 0.5f, 0.5f);
+}
+
+LinearImage colorsToVectors(const LinearImage& image) {
+    ASSERT_PRECONDITION(image.getChannels() == 3 || image.getChannels() == 4,
+                        "Must be a 3 or 4 channel image");
+    return image.getChannels() == 3
+        ? applyScaleOffset<float3>(image, 2.0f, -1.0f)
+        : applyScaleOffset<float4>(image, 2.0f, -1.0f);
+}
+
+LinearImage extractChannel(const LinearImage& source, uint32_t channel) {
+    const uint32_t width = source.getWidth(), height = source.getHeight();
+    const uint32_t nchan = source.getChannels();
+    ASSERT_PRECONDITION(channel < nchan, "Channel is out of range.");
+    LinearImage result(width, height, 1);
+    auto src = source.getPixelRef();
+    auto dst = result.getPixelRef();
+    for (uint32_t n = 0, npixels = width * height; n < npixels; ++n, ++dst, src += nchan) {
+        dst[0] = src[channel];
     }
     return result;
 }
@@ -208,6 +241,14 @@ int compare(const LinearImage& a, const LinearImage& b, float epsilon) {
     float const* bdata = b.getPixelRef();
     return std::lexicographical_compare(adata, adata + w * h * c, bdata, bdata + w * h * c,
             [epsilon](float x, float y) { return x < y - epsilon; });
+}
+
+void clearToValue(LinearImage& image, float value) {
+    const uint32_t nvals = image.getWidth() * image.getHeight() * image.getChannels();
+    float* data = image.getPixelRef();
+    for (uint32_t index = 0; index < nvals; ++index) {
+        data[index] = value;
+    }
 }
 
 } // namespace image

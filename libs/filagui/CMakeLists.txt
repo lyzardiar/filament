@@ -7,10 +7,13 @@ set(PUBLIC_HDR_DIR include)
 # ==================================================================================================
 # Sources and headers
 # ==================================================================================================
-file(GLOB_RECURSE PUBLIC_HDRS ${PUBLIC_HDR_DIR}/${TARGET}/*.h)
+set(PUBLIC_HDRS
+        ${PUBLIC_HDR_DIR}/${TARGET}/ImGuiExtensions.h
+        ${PUBLIC_HDR_DIR}/${TARGET}/ImGuiHelper.h)
 
 set(SRCS
         src/ImGuiHelper.cpp
+        src/ImGuiExtensions.cpp
 )
 
 # ==================================================================================================
@@ -18,7 +21,6 @@ set(SRCS
 # ==================================================================================================
 
 if (CMAKE_CROSSCOMPILING)
-    set(IMPORT_EXECUTABLES ${FILAMENT}/${IMPORT_EXECUTABLES_DIR}/ImportExecutables-${CMAKE_BUILD_TYPE}.cmake)
     include(${IMPORT_EXECUTABLES})
 endif()
 
@@ -30,7 +32,7 @@ set(GENERATION_ROOT ${CMAKE_CURRENT_BINARY_DIR})
 file(MAKE_DIRECTORY "${GENERATION_ROOT}/generated/material/")
 
 # Target system.
-if (ANDROID)
+if (ANDROID OR WEBGL)
     set(MATC_TARGET mobile)
 else()
     set(MATC_TARGET desktop)
@@ -38,8 +40,8 @@ endif()
 
 # Optimize materials for performance in Release mode.
 set(MATC_FLAGS -a all)
-if (CMAKE_BUILD_TYPE MATCHES Release)
-    set(MATC_FLAGS ${MATC_FLAGS} -O)
+if (NOT CMAKE_BUILD_TYPE MATCHES Release)
+    set(MATC_FLAGS ${MATC_FLAGS} -g)
 endif()
 
 foreach (mat_src ${MATERIAL_SRCS})

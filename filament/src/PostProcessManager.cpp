@@ -15,166 +15,219 @@
  */
 
 #include "PostProcessManager.h"
-#include "RenderTargetPool.h"
 
 #include "details/Engine.h"
+
+#include "fg/FrameGraph.h"
+
+#include <private/filament/SibGenerator.h>
+
+#include <filament/MaterialEnums.h>
 
 #include <utils/Log.h>
 
 namespace filament {
 
 using namespace utils;
-using namespace driver;
-using namespace details;
+using namespace math;
+using namespace backend;
+using namespace filament::details;
 
 void PostProcessManager::init(FEngine& engine) noexcept {
     mEngine = &engine;
-
-    mCommands.reserve(8);
-
-    mPostProcessUb = UniformBuffer(engine.getPerPostProcessUib());
+    mPostProcessUb = UniformBuffer(PostProcessingUib::getUib().getSize());
 
     // create sampler for post-process FBO
     DriverApi& driver = engine.getDriverApi();
-    mPostProcessSbh = driver.createSamplerBuffer(engine.getPostProcessSib().getSize());
-    mPostProcessUbh = driver.createUniformBuffer(engine.getPerPostProcessUib().getSize());
+    mPostProcessSbh = driver.createSamplerGroup(PostProcessSib::SAMPLER_COUNT);
+    mPostProcessUbh = driver.createUniformBuffer(mPostProcessUb.getSize(),
+            backend::BufferUsage::DYNAMIC);
     driver.bindSamplers(BindingPoints::POST_PROCESS, mPostProcessSbh);
-    driver.bindUniforms(BindingPoints::POST_PROCESS, mPostProcessUbh);
+    driver.bindUniformBuffer(BindingPoints::POST_PROCESS, mPostProcessUbh);
 }
 
-void PostProcessManager::terminate(driver::DriverApi& driver) noexcept {
-    driver.destroySamplerBuffer(mPostProcessSbh);
+void PostProcessManager::terminate(backend::DriverApi& driver) noexcept {
+    driver.destroySamplerGroup(mPostProcessSbh);
     driver.destroyUniformBuffer(mPostProcessUbh);
 }
 
 void PostProcessManager::setSource(uint32_t viewportWidth, uint32_t viewportHeight,
-        const RenderTargetPool::Target* pos) const noexcept {
+        backend::Handle<backend::HwTexture> color,
+        backend::Handle<backend::HwTexture> depth,
+        uint32_t textureWidth, uint32_t textureHeight) const noexcept {
     FEngine& engine = *mEngine;
     DriverApi& driver = engine.getDriverApi();
 
     // FXAA requires linear filtering. The post-processing stage however, doesn't
     // use samplers.
-    driver::SamplerParams params;
+    backend::SamplerParams params;
     params.filterMag = SamplerMagFilter::LINEAR;
     params.filterMin = SamplerMinFilter::LINEAR;
-    SamplerBuffer sb(engine.getPostProcessSib());
-    sb.setSampler(FEngine::PostProcessSib::COLOR_BUFFER, pos->texture, params);
+    SamplerGroup group(PostProcessSib::SAMPLER_COUNT);
+    group.setSampler(PostProcessSib::COLOR_BUFFER, color, params);
+    group.setSampler(PostProcessSib::DEPTH_BUFFER, depth, {});
 
-    auto duration = engine.getTime();
+    auto duration = engine.getEngineTime();
     float fraction = (duration.count() % 1000000000) / 1000000000.0f;
 
+    float2 uvScale = float2{ viewportWidth, viewportHeight } / float2{ textureWidth, textureHeight };
+
     UniformBuffer& ub = mPostProcessUb;
-    ub.setUniform(offsetof(FEngine::PostProcessingUib, time), fraction);
-    ub.setUniform(offsetof(FEngine::PostProcessingUib, uvScale),
-            math::float2{ viewportWidth, viewportHeight } / math::float2{ pos->w, pos->h });
+    ub.setUniform(offsetof(PostProcessingUib, time), fraction);
+    ub.setUniform(offsetof(PostProcessingUib, uvScale), uvScale);
 
     // The shader may need to know the offset between the top of the texture and the top
     // of the rectangle that it actually needs to sample from.
-    const float yOffset = pos->h - viewportHeight;
-    ub.setUniform(offsetof(FEngine::PostProcessingUib, yOffset), yOffset);
+    const float yOffset = textureHeight - viewportHeight;
+    ub.setUniform(offsetof(PostProcessingUib, yOffset), yOffset);
 
-    driver.updateSamplerBuffer(mPostProcessSbh, std::move(sb));
-    driver.updateUniformBuffer(mPostProcessUbh, UniformBuffer(ub));
+    driver.updateSamplerGroup(mPostProcessSbh, std::move(group));
+    driver.loadUniformBuffer(mPostProcessUbh, ub.toBufferDescriptor(driver));
 }
 
-void PostProcessManager::blit(driver::TextureFormat format) noexcept {
-    mCommands.push_back({{}, format});
+// ------------------------------------------------------------------------------------------------
+
+FrameGraphResource PostProcessManager::toneMapping(FrameGraph& fg, FrameGraphResource input,
+        backend::TextureFormat outFormat, bool dithering, bool translucent) noexcept {
+
+    FEngine* engine = mEngine;
+    backend::Handle<backend::HwRenderPrimitive> const& fullScreenRenderPrimitive = engine->getFullScreenRenderPrimitive();
+
+    struct PostProcessToneMapping {
+        FrameGraphResource input;
+        FrameGraphResource output;
+    };
+    backend::Handle<backend::HwProgram> toneMappingProgram = engine->getPostProcessProgram(
+            translucent ? PostProcessStage::TONE_MAPPING_TRANSLUCENT
+                        : PostProcessStage::TONE_MAPPING_OPAQUE);
+
+    auto& ppToneMapping = fg.addPass<PostProcessToneMapping>("tonemapping",
+            [&](FrameGraph::Builder& builder, PostProcessToneMapping& data) {
+                auto const* inputDesc = fg.getDescriptor(input);
+                data.input = builder.read(input);
+
+                FrameGraphResource::Descriptor outputDesc{
+                        .width = inputDesc->width,
+                        .height = inputDesc->height,
+                        .format = outFormat
+                };
+                data.output = builder.createTexture("tonemapping output", outputDesc);
+                data.output = builder.useRenderTarget(data.output).textures[0];
+            },
+            [=](FrameGraphPassResources const& resources,
+                    PostProcessToneMapping const& data, DriverApi& driver) {
+                PipelineState pipeline;
+                pipeline.rasterState.culling = RasterState::CullingMode::NONE;
+                pipeline.rasterState.colorWrite = true;
+                pipeline.rasterState.depthFunc = RasterState::DepthFunc::A;
+                pipeline.program = toneMappingProgram;
+
+                auto const& textureDesc = resources.getDescriptor(data.input);
+                auto const& color = resources.getTexture(data.input);
+                // TODO: the first parameters below are the *actual viewport* size
+                //       (as opposed to the size of the source texture). Currently we don't allow
+                //       the texture to be resized, so they match. We'll need something more
+                //       sofisticated in the future.
+
+                mPostProcessUb.setUniform(offsetof(PostProcessingUib, dithering), dithering);
+                setSource(textureDesc.width, textureDesc.height,
+                        color, {}, textureDesc.width, textureDesc.height);
+
+                auto const& target = resources.getRenderTarget(data.output);
+                driver.beginRenderPass(target.target, target.params);
+                driver.draw(pipeline, fullScreenRenderPrimitive);
+                driver.endRenderPass();
+            });
+
+    return ppToneMapping.getData().output;
 }
 
-void PostProcessManager::pass(driver::TextureFormat format, Handle<HwProgram> program) noexcept {
-    mCommands.push_back({program, format});
+FrameGraphResource PostProcessManager::fxaa(FrameGraph& fg,
+        FrameGraphResource input, backend::TextureFormat outFormat, bool translucent) noexcept {
+
+    FEngine* engine = mEngine;
+    backend::Handle<backend::HwRenderPrimitive> const& fullScreenRenderPrimitive = engine->getFullScreenRenderPrimitive();
+
+    struct PostProcessFXAA {
+        FrameGraphResource input;
+        FrameGraphResource output;
+    };
+
+    backend::Handle<backend::HwProgram> antiAliasingProgram = engine->getPostProcessProgram(
+            translucent ? PostProcessStage::ANTI_ALIASING_TRANSLUCENT
+                        : PostProcessStage::ANTI_ALIASING_OPAQUE);
+
+    auto& ppFXAA = fg.addPass<PostProcessFXAA>("fxaa",
+            [&](FrameGraph::Builder& builder, PostProcessFXAA& data) {
+                auto* inputDesc = fg.getDescriptor(input);
+                data.input = builder.read(input);
+
+                FrameGraphResource::Descriptor outputDesc{
+                        .width = inputDesc->width,
+                        .height = inputDesc->height,
+                        .format = outFormat
+                };
+                data.output = builder.createTexture("fxaa output", outputDesc);
+                data.output = builder.useRenderTarget(data.output).textures[0];
+            },
+            [=](FrameGraphPassResources const& resources,
+                    PostProcessFXAA const& data, DriverApi& driver) {
+                PipelineState pipeline;
+                pipeline.rasterState.culling = RasterState::CullingMode::NONE;
+                pipeline.rasterState.colorWrite = true;
+                pipeline.rasterState.depthFunc = RasterState::DepthFunc::A;
+                pipeline.program = antiAliasingProgram;
+
+                auto const& textureDesc = resources.getDescriptor(data.input);
+                auto const& texture = resources.getTexture(data.input);
+                // TODO: the first parameters below are the *actual viewport* size
+                //       (as opposed to the size of the source texture). Currently we don't allow
+                //       the texture to be resized, so they match. We'll need something more
+                //       sofisticated in the future.
+                setSource(textureDesc.width, textureDesc.height,
+                        texture, {}, textureDesc.width, textureDesc.height);
+
+                auto const& target = resources.getRenderTarget(data.output);
+                driver.beginRenderPass(target.target, target.params);
+                driver.draw(pipeline, fullScreenRenderPrimitive);
+                driver.endRenderPass();
+            });
+
+    return ppFXAA.getData().output;
 }
 
-void PostProcessManager::finish(driver::TargetBufferFlags discarded,
-        Handle<HwRenderTarget> viewRenderTarget,
-        Viewport const& vp,
-        RenderTargetPool::Target const* previous,
-        Viewport const& svp) {
+FrameGraphResource PostProcessManager::dynamicScaling(FrameGraph& fg,
+        FrameGraphResource input, backend::TextureFormat outFormat) noexcept {
 
-    assert(viewRenderTarget);
-    assert(previous);
+    struct PostProcessScaling {
+        FrameGraphResource input;
+        FrameGraphResource output;
+    };
 
-    FEngine& engine = *mEngine;
-    DriverApi& driver = engine.getDriverApi();
-    RenderTargetPool& rtp = engine.getRenderTargetPool();
-    Handle<HwRenderPrimitive> const& fullScreenRenderPrimitive = engine.getFullScreenRenderPrimitive();
-    std::vector<Command>& commands = mCommands;
+    auto& ppScaling = fg.addPass<PostProcessScaling>("scaling",
+            [&](FrameGraph::Builder& builder, PostProcessScaling& data) {
+                auto* inputDesc = fg.getDescriptor(input);
+                data.input = builder.useRenderTarget(input).textures[0];
 
-    if (UTILS_UNLIKELY(commands.empty())) {
-        rtp.put(previous);
-        return;
-    }
+                FrameGraphResource::Descriptor outputDesc{
+                        .width = inputDesc->width,
+                        .height = inputDesc->height,
+                        .format = outFormat
+                };
+                data.output = builder.createTexture("scale output", outputDesc);
+                data.output = builder.useRenderTarget(data.output).textures[0];
+            },
+            [=](FrameGraphPassResources const& resources,
+                    PostProcessScaling const& data, DriverApi& driver) {
+                auto in = resources.getRenderTarget(data.input);
+                auto out = resources.getRenderTarget(data.output);
+                driver.blit(TargetBufferFlags::COLOR,
+                        out.target, out.params.viewport, in.target, in.params.viewport,
+                        SamplerMagFilter::LINEAR);
+            });
 
-    Driver::RasterState rs;
-    rs.culling = Driver::RasterState::CullingMode::NONE;
-    rs.colorWrite = true;
-    rs.depthFunc = Driver::RasterState::DepthFunc::A;
-
-    RenderPassParams params = {};
-    params.discardStart = TargetBufferFlags::ALL;
-    params.discardEnd = TargetBufferFlags::DEPTH_AND_STENCIL;
-    params.left = 0;
-    params.bottom = 0;
-    params.width = svp.width;
-    params.height = svp.height;
-    params.dependencies = RenderPassParams::DEPENDENCY_BY_REGION;
-
-    for (size_t i = 0, c = commands.size() - 1; i < c; i++) {
-        // if the next command is a blit, it we don't need a texture
-        uint8_t flags = !commands[i + 1].program ? RenderTargetPool::Target::NO_TEXTURE : uint8_t();
-
-        // create a render target for this pass
-        RenderTargetPool::Target const* target = rtp.get(
-                TargetBufferFlags::COLOR, svp.width, svp.height, 1, commands[i].format, flags);
-
-        assert(target);
-
-        if (commands[i].program) {
-            // set the source for this pass (i.e. previous target)
-            setSource(params.width, params.height, previous);
-
-            // draw a full screen triangle
-            driver.beginRenderPass(target->target, params);
-            driver.draw(commands[i].program, rs, fullScreenRenderPrimitive);
-            driver.endRenderPass();
-        } else {
-            driver.blit(TargetBufferFlags::COLOR,
-                    target->target, 0, 0, svp.width, svp.height,
-                    previous->target, 0, 0, svp.width, svp.height);
-        }
-        // return the previous target to the pool
-        rtp.put(previous);
-        previous = target;
-    }
-
-    assert(!commands.empty());
-    assert(previous);
-
-    // The last command is special, it always draw to the viewRenderTarget and uses
-    // the non scaled viewport.
-    if (commands.back().program) {
-        params.discardStart = discarded;
-        params.discardEnd = TargetBufferFlags::DEPTH_AND_STENCIL;
-        params.left = vp.left;
-        params.bottom = vp.bottom;
-        params.width = vp.width;
-        params.height = vp.height;
-
-        setSource(params.width, params.height, previous);
-        driver.beginRenderPass(viewRenderTarget, params);
-        driver.draw(commands.back().program, rs, fullScreenRenderPrimitive);
-        driver.endRenderPass();
-
-    } else {
-        driver.blit(TargetBufferFlags::COLOR,
-                viewRenderTarget, vp.left, vp.bottom, vp.width, vp.height,
-                previous->target, 0, 0, svp.width, svp.height);
-    }
-
-    rtp.put(previous);
-
-    // clear our command buffer
-    commands.clear();
+    return ppScaling.getData().output;
 }
+
 
 } // namespace filament

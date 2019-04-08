@@ -19,6 +19,7 @@
 
 #include <image/LinearImage.h>
 
+#include <cstddef>
 #include <initializer_list>
 
 namespace image {
@@ -37,6 +38,10 @@ LinearImage verticalFlip(const LinearImage& image);
 
 // Transforms normals (components live in [-1,+1]) into colors (components live in [0,+1]).
 LinearImage vectorsToColors(const LinearImage& image);
+LinearImage colorsToVectors(const LinearImage& image);
+
+// Creates a single-channel image by extracting the selected channel.
+LinearImage extractChannel(const LinearImage& image, uint32_t channel);
 
 // Constructs a multi-channel image by copying data from a sequence of single-channel images.
 LinearImage combineChannels(std::initializer_list<LinearImage> images);
@@ -51,6 +56,9 @@ LinearImage cropRegion(const LinearImage& image, uint32_t l, uint32_t t, uint32_
 
 // Lexicographically compares two images, similar to memcmp.
 int compare(const LinearImage& a, const LinearImage& b, float epsilon = 0.0f);
+
+// Sets all pixels in all channels to the given value.
+void clearToValue(LinearImage& img, float value);
 
 } // namespace image
 

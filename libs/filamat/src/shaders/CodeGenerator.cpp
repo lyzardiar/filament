@@ -16,7 +16,7 @@
 
 #include "CodeGenerator.h"
 
-#include "Shaders.h"
+#include "generated/shaders.h"
 
 #include <cctype>
 #include <iomanip>
@@ -25,7 +25,7 @@ namespace filamat {
 
 // From driverEnum namespace
 using namespace filament;
-using namespace driver;
+using namespace backend;
 using namespace utils;
 
 std::ostream& CodeGenerator::generateSeparator(std::ostream& out) const {
@@ -41,7 +41,7 @@ std::ostream& CodeGenerator::generateProlog(std::ostream& out, ShaderType type,
             break;
         case ShaderModel::GL_ES_30:
             // Vulkan requires version 310 or higher
-            if (mCodeGenTargetApi == TargetApi::VULKAN) {
+            if (mTargetLanguage == TargetLanguage::SPIRV) {
                 // Vulkan requires layout locations on ins and outs, which were not supported
                 // in the OpenGL 4.1 GLSL profile.
                 out << "#version 310 es\n\n";
@@ -54,7 +54,7 @@ std::ostream& CodeGenerator::generateProlog(std::ostream& out, ShaderType type,
             out << "#define TARGET_MOBILE\n";
             break;
         case ShaderModel::GL_CORE_41:
-            if (mCodeGenTargetApi == TargetApi::VULKAN) {
+            if (mTargetLanguage == TargetLanguage::SPIRV) {
                 // Vulkan requires binding specifiers on uniforms and samplers, which were not
                 // supported in the OpenGL 4.1 GLSL profile.
                 out << "#version 450 core\n\n";
@@ -67,8 +67,11 @@ std::ostream& CodeGenerator::generateProlog(std::ostream& out, ShaderType type,
     if (mTargetApi == TargetApi::VULKAN) {
         out << "#define TARGET_VULKAN_ENVIRONMENT\n";
     }
-    if (mCodeGenTargetApi == TargetApi::VULKAN) {
-        out << "#define CODEGEN_TARGET_VULKAN_ENVIRONMENT\n";
+    if (mTargetApi == TargetApi::METAL) {
+        out << "#define TARGET_METAL_ENVIRONMENT\n";
+    }
+    if (mTargetLanguage == TargetLanguage::SPIRV) {
+        out << "#define TARGET_LANGUAGE_SPIRV\n";
     }
 
     Precision defaultPrecision = getDefaultPrecision(type);
@@ -81,7 +84,7 @@ std::ostream& CodeGenerator::generateProlog(std::ostream& out, ShaderType type,
         out << "invariant gl_Position;\n";
     }
 
-    out << filament::shaders::common_types_fs;
+    out << SHADERS_COMMON_TYPES_FS_DATA;
 
     out << "\n";
     return out;
@@ -115,10 +118,10 @@ std::ostream& CodeGenerator::generateEpilog(std::ostream& out) const {
 
 std::ostream& CodeGenerator::generateShaderMain(std::ostream& out, ShaderType type) const {
     if (type == ShaderType::VERTEX) {
-        out << filament::shaders::shadowing_vs;
-        out << filament::shaders::main_vs;
+        out << SHADERS_SHADOWING_VS_DATA;
+        out << SHADERS_MAIN_VS_DATA;
     } else if (type == ShaderType::FRAGMENT) {
-        out << filament::shaders::main_fs;
+        out << SHADERS_MAIN_FS_DATA;
     }
     return out;
 }
@@ -126,21 +129,21 @@ std::ostream& CodeGenerator::generateShaderMain(std::ostream& out, ShaderType ty
 std::ostream& CodeGenerator::generatePostProcessMain(std::ostream& out,
         ShaderType type, filament::PostProcessStage variant) const {
     if (type == ShaderType::VERTEX) {
-        out << filament::shaders::post_process_vs;
+        out << SHADERS_POST_PROCESS_VS_DATA;
     } else if (type == ShaderType::FRAGMENT) {
         switch (variant) {
             case PostProcessStage::TONE_MAPPING_OPAQUE:
             case PostProcessStage::TONE_MAPPING_TRANSLUCENT:
-                out << filament::shaders::tone_mapping_fs;
-                out << filament::shaders::conversion_functions_fs;
-                out << filament::shaders::dithering_fs;
+                out << SHADERS_TONE_MAPPING_FS_DATA;
+                out << SHADERS_CONVERSION_FUNCTIONS_FS_DATA;
+                out << SHADERS_DITHERING_FS_DATA;
                 break;
             case PostProcessStage::ANTI_ALIASING_OPAQUE:
             case PostProcessStage::ANTI_ALIASING_TRANSLUCENT:
-                out << filament::shaders::fxaa_fs;
+                out << SHADERS_FXAA_FS_DATA;
                 break;
         }
-        out << filament::shaders::post_process_fs;
+        out << SHADERS_POST_PROCESS_FS_DATA;
     }
     return out;
 }
@@ -160,7 +163,7 @@ std::ostream& CodeGenerator::generateVariable(std::ostream& out, ShaderType type
     return out;
 }
 
-std::ostream& CodeGenerator::generateVariables(std::ostream& out, ShaderType type,
+std::ostream& CodeGenerator::generateShaderInputs(std::ostream& out, ShaderType type,
         const AttributeBitset& attributes, Interpolation interpolation) const {
 
     const char* shading = getInterpolationQualifier(interpolation);
@@ -206,18 +209,18 @@ std::ostream& CodeGenerator::generateVariables(std::ostream& out, ShaderType typ
             generateDefine(out, "LOCATION_BONE_WEIGHTS", uint32_t(VertexAttribute::BONE_WEIGHTS));
         }
 
-        out << filament::shaders::variables_vs;
+        out << SHADERS_INPUTS_VS_DATA;
     } else if (type == ShaderType::FRAGMENT) {
-        out << filament::shaders::variables_fs;
+        out << SHADERS_INPUTS_FS_DATA;
     }
     return out;
 }
 
 std::ostream& CodeGenerator::generateDepthShaderMain(std::ostream& out, ShaderType type) const {
     if (type == ShaderType::VERTEX) {
-        out << filament::shaders::depth_main_vs;
+        out << SHADERS_DEPTH_MAIN_VS_DATA;
     } else if (type == ShaderType::FRAGMENT) {
-        out << filament::shaders::depth_main_fs;
+        out << SHADERS_DEPTH_MAIN_FS_DATA;
     }
     return out;
 }
@@ -248,7 +251,7 @@ std::ostream& CodeGenerator::generateUniforms(std::ostream& out, ShaderType shad
     Precision defaultPrecision = getDefaultPrecision(shaderType);
 
     out << "\nlayout(";
-    if (mCodeGenTargetApi == TargetApi::VULKAN) {
+    if (mTargetLanguage == TargetLanguage::SPIRV) {
         uint32_t bindingIndex = (uint32_t) binding; // avoid char output
         out << "binding = " << bindingIndex << ", ";
     }
@@ -277,31 +280,87 @@ std::ostream& CodeGenerator::generateSamplers(
         return out;
     }
 
-    const CString& blockName = sib.getName();
-    std::string instanceName(blockName.c_str());
-    instanceName.front() = char(std::tolower((unsigned char)instanceName.front()));
-
     for (auto const& info : infos) {
+
+        CString uniformName =
+                SamplerInterfaceBlock::getUniformName(
+                        sib.getName().c_str(), info.name.c_str());
+
         auto type = info.type;
-        if (info.type == SamplerType::SAMPLER_EXTERNAL && mShaderModel != ShaderModel::GL_ES_30) {
+        if (type == SamplerType::SAMPLER_EXTERNAL && mShaderModel != ShaderModel::GL_ES_30) {
             // we're generating the shader for the desktop, where we assume external textures
             // are not supported, in which case we revert to texture2d
             type = SamplerType::SAMPLER_2D;
         }
         char const* const typeName = getSamplerTypeName(type, info.format, info.multisample);
         char const* const precision = getPrecisionQualifier(info.precision, Precision::DEFAULT);
-        if (mCodeGenTargetApi == TargetApi::VULKAN) {
+        if (mTargetLanguage == TargetLanguage::SPIRV) {
             const uint32_t bindingIndex = (uint32_t) firstBinding + info.offset;
-            out << "layout(binding = " << bindingIndex << ") ";
+            out << "layout(binding = " << bindingIndex;
+
+            // For Vulkan, we place uniforms in set 0 (the default set) and samplers in set 1. This
+            // allows the sampler bindings to live in a separate "namespace" that starts at zero.
+            // Note that the set specifier is not covered by the desktop GLSL spec, including
+            // recent versions. It is only documented in the GL_KHR_vulkan_glsl extension.
+            if (mTargetApi == TargetApi::VULKAN) {
+                out << ", set = 1";
+            }
+
+            out << ") ";
         }
-        out << "uniform " << precision << " " << typeName << " " <<
-                instanceName << "_" << info.name.c_str();
+        out << "uniform " << precision << " " << typeName << " " << uniformName.c_str();
         out << ";\n";
     }
     out << "\n";
 
     return out;
 }
+
+void CodeGenerator::fixupExternalSamplers(
+        std::string& shader, SamplerInterfaceBlock const& sib) noexcept {
+    auto const& infos = sib.getSamplerInfoList();
+    if (infos.empty()) {
+        return;
+    }
+
+    bool hasExternalSampler = false;
+
+    // Replace sampler2D declarations by samplerExternal declarations as they may have
+    // been swapped during a previous optimization step
+    for (auto const& info : infos) {
+        if (info.type == SamplerType::SAMPLER_EXTERNAL) {
+
+            CString uniformName =
+                    SamplerInterfaceBlock::getUniformName(
+                            sib.getName().c_str(), info.name.c_str());
+
+            auto name = std::string("sampler2D ") + uniformName.c_str();
+            size_t index = shader.find(name);
+
+            if (index != std::string::npos) {
+                hasExternalSampler = true;
+                auto newName =
+                        std::string("samplerExternalOES ") + uniformName.c_str();
+                shader.replace(index, name.size(), newName);
+            }
+        }
+    }
+
+    // This method should only be called on shaders that have external samplers but since
+    // they may have been removed by previous optimization steps, we check again here
+    if (hasExternalSampler) {
+        // Find the #version line so we can insert the #extension directive
+        size_t index = shader.find("#version");
+        index += 8;
+
+        // Find the end of the line and skip the line return
+        while (shader[index] != '\n') index++;
+        index++;
+
+        shader.insert(index, "#extension GL_OES_EGL_image_external_essl3 : require\n");
+    }
+}
+
 
 std::ostream& CodeGenerator::generateDefine(std::ostream& out, const char* name, bool value) const {
     if (value) {
@@ -334,7 +393,7 @@ std::ostream& CodeGenerator::generateFunction(std::ostream& out, const char* ret
 }
 
 std::ostream& CodeGenerator::generateMaterialProperty(std::ostream& out,
-        Property property, bool isSet) const {
+        MaterialBuilder::Property property, bool isSet) const {
     if (isSet) {
         out << "#define " << "MATERIAL_HAS_" << getConstantName(property) << "\n";
     }
@@ -342,29 +401,29 @@ std::ostream& CodeGenerator::generateMaterialProperty(std::ostream& out,
 }
 
 std::ostream& CodeGenerator::generateCommon(std::ostream& out, ShaderType type) const {
-    out << filament::shaders::common_math_fs;
+    out << SHADERS_COMMON_MATH_FS_DATA;
     if (type == ShaderType::VERTEX) {
     } else if (type == ShaderType::FRAGMENT) {
-        out << filament::shaders::common_graphics_fs;
+        out << SHADERS_COMMON_GRAPHICS_FS_DATA;
     }
     return out;
 }
 
 std::ostream& CodeGenerator::generateCommonMaterial(std::ostream& out, ShaderType type) const {
     if (type == ShaderType::VERTEX) {
-        out << filament::shaders::common_material_vs;
+        out << SHADERS_COMMON_MATERIAL_VS_DATA;
     } else if (type == ShaderType::FRAGMENT) {
-        out << filament::shaders::common_material_fs;
+        out << SHADERS_COMMON_MATERIAL_FS_DATA;
     }
     return out;
 }
 
 std::ostream& CodeGenerator::generateGetters(std::ostream& out, ShaderType type) const {
-    out << filament::shaders::common_getters_fs;
+    out << SHADERS_COMMON_GETTERS_FS_DATA;
     if (type == ShaderType::VERTEX) {
-        out << filament::shaders::getters_vs;
+        out << SHADERS_GETTERS_VS_DATA;
     } else if (type == ShaderType::FRAGMENT) {
-        out << filament::shaders::getters_fs;
+        out << SHADERS_GETTERS_FS_DATA;
     }
     return out;
 }
@@ -372,7 +431,7 @@ std::ostream& CodeGenerator::generateGetters(std::ostream& out, ShaderType type)
 std::ostream& CodeGenerator::generateParameters(std::ostream& out, ShaderType type) const {
     if (type == ShaderType::VERTEX) {
     } else if (type == ShaderType::FRAGMENT) {
-        out << filament::shaders::shading_parameters_fs;
+        out << SHADERS_SHADING_PARAMETERS_FS_DATA;
     }
     return out;
 }
@@ -381,38 +440,38 @@ std::ostream& CodeGenerator::generateShaderLit(std::ostream& out, ShaderType typ
         filament::Variant variant, filament::Shading shading) const {
     if (type == ShaderType::VERTEX) {
     } else if (type == ShaderType::FRAGMENT) {
-        out << filament::shaders::common_lighting_fs;
+        out << SHADERS_COMMON_LIGHTING_FS_DATA;
         if (variant.hasShadowReceiver()) {
-            out << filament::shaders::shadowing_fs;
+            out << SHADERS_SHADOWING_FS_DATA;
         }
 
-        out << filament::shaders::brdf_fs;
+        out << SHADERS_BRDF_FS_DATA;
         switch (shading) {
             case Shading::UNLIT:
                 assert("Lit shader generated with unlit shading model");
                 break;
             case Shading::LIT:
-                out << filament::shaders::shading_model_standard_fs;
+                out << SHADERS_SHADING_MODEL_STANDARD_FS_DATA;
                 break;
             case Shading::SUBSURFACE:
-                out << filament::shaders::shading_model_subsurface_fs;
+                out << SHADERS_SHADING_MODEL_SUBSURFACE_FS_DATA;
                 break;
             case Shading::CLOTH:
-                out << filament::shaders::shading_model_cloth_fs;
+                out << SHADERS_SHADING_MODEL_CLOTH_FS_DATA;
                 break;
         }
 
         if (shading != Shading::UNLIT) {
-            out << filament::shaders::light_indirect_fs;
+            out << SHADERS_LIGHT_INDIRECT_FS_DATA;
         }
         if (variant.hasDirectionalLighting()) {
-            out << filament::shaders::light_directional_fs;
+            out << SHADERS_LIGHT_DIRECTIONAL_FS_DATA;
         }
         if (variant.hasDynamicLighting()) {
-            out << filament::shaders::light_punctual_fs;
+            out << SHADERS_LIGHT_PUNCTUAL_FS_DATA;
         }
 
-        out << filament::shaders::shading_lit_fs;
+        out << SHADERS_SHADING_LIT_FS_DATA;
     }
     return out;
 }
@@ -423,16 +482,17 @@ std::ostream& CodeGenerator::generateShaderUnlit(std::ostream& out, ShaderType t
     } else if (type == ShaderType::FRAGMENT) {
         if (hasShadowMultiplier) {
             if (variant.hasShadowReceiver()) {
-                out << filament::shaders::shadowing_fs;
+                out << SHADERS_SHADOWING_FS_DATA;
             }
         }
-        out << filament::shaders::shading_unlit_fs;
+        out << SHADERS_SHADING_UNLIT_FS_DATA;
     }
     return out;
 }
 
 /* static */
-char const* CodeGenerator::getConstantName(Property property) noexcept {
+char const* CodeGenerator::getConstantName(MaterialBuilder::Property property) noexcept {
+    using Property = MaterialBuilder::Property;
     switch (property) {
         case Property::BASE_COLOR:           return "BASE_COLOR";
         case Property::ROUGHNESS:            return "ROUGHNESS";
@@ -441,6 +501,7 @@ char const* CodeGenerator::getConstantName(Property property) noexcept {
         case Property::AMBIENT_OCCLUSION:    return "AMBIENT_OCCLUSION";
         case Property::CLEAR_COAT:           return "CLEAR_COAT";
         case Property::CLEAR_COAT_ROUGHNESS: return "CLEAR_COAT_ROUGHNESS";
+        case Property::CLEAR_COAT_NORMAL:    return "CLEAR_COAT_NORMAL";
         case Property::ANISOTROPY:           return "ANISOTROPY";
         case Property::ANISOTROPY_DIRECTION: return "ANISOTROPY_DIRECTION";
         case Property::THICKNESS:            return "THICKNESS";
@@ -449,6 +510,7 @@ char const* CodeGenerator::getConstantName(Property property) noexcept {
         case Property::SHEEN_COLOR:          return "SHEEN_COLOR";
         case Property::EMISSIVE:             return "EMISSIVE";
         case Property::NORMAL:               return "NORMAL";
+        case Property::POST_LIGHTING_COLOR:  return "POST_LIGHTING_COLOR";
     }
 }
 
@@ -510,7 +572,7 @@ char const* CodeGenerator::getSamplerTypeName(SamplerType type, SamplerFormat fo
             // Vulkan doesn't have external textures in the sense as GL. Vulkan external textures
             // are created via VK_ANDROID_external_memory_android_hardware_buffer, but they are
             // backed by VkImage just like a normal texture, and sampled from normally.
-            return (mCodeGenTargetApi == TargetApi::VULKAN) ? "sampler2D" : "samplerExternalOES";
+            return (mTargetLanguage == TargetLanguage::SPIRV) ? "sampler2D" : "samplerExternalOES";
     }
 }
 

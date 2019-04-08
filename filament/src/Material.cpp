@@ -18,18 +18,21 @@
 
 #include "details/Engine.h"
 #include "details/DFG.h"
-#include "driver/Program.h"
+
+#include "private/backend/Program.h"
 
 #include "FilamentAPI-impl.h"
+
+#include <backend/DriverEnums.h>
 
 #include <private/filament/SibGenerator.h>
 #include <private/filament/UibGenerator.h>
 #include <private/filament/Variant.h>
 
-#include <filament/SamplerInterfaceBlock.h>
-#include <filament/UniformInterfaceBlock.h>
+#include <private/filament/SamplerInterfaceBlock.h>
+#include <private/filament/UniformInterfaceBlock.h>
 
-#include <filaflat/MaterialParser.h>
+#include <MaterialParser.h>
 
 #include <utils/Panic.h>
 
@@ -41,13 +44,13 @@ using namespace filaflat;
 namespace filament {
 
 using namespace details;
-using namespace driver;
+using namespace backend;
 
 
 struct Material::BuilderDetails {
     const void* mPayload = nullptr;
     size_t mSize = 0;
-    filaflat::MaterialParser* mMaterialParser = nullptr;
+    MaterialParser* mMaterialParser = nullptr;
     bool mDefaultMaterial = false;
 };
 
@@ -77,20 +80,31 @@ Material* Material::Builder::build(Engine& engine) {
         return nullptr;
     }
 
-    assert(upcast(engine).getBackend() != Backend::DEFAULT && "Default backend has not been resolved.");
+    uint32_t version;
+    materialParser->getMaterialVersion(&version);
+    ASSERT_PRECONDITION(version == MATERIAL_VERSION, "Material version mismatch. Expected %d but "
+            "received %d.", MATERIAL_VERSION, version);
+
+    assert(upcast(engine).getBackend() != Backend::DEFAULT &&
+            "Default backend has not been resolved.");
 
     uint32_t v;
     materialParser->getShaderModels(&v);
     utils::bitset32 shaderModels;
     shaderModels.setValue(v);
 
-    uint32_t sm = static_cast<uint32_t>(upcast(engine).getDriver().getShaderModel());
-    CString name;
-    materialParser->getName(&name);
-    if (!ASSERT_POSTCONDITION_NON_FATAL(shaderModels.test(sm),
-            "the material '%s' does not contain shaders compatible with this platform; "
-            "need shader model %d but have 0x%02x", name.c_str_safe(), sm,
-            shaderModels.getValue())) {
+    backend::ShaderModel shaderModel = upcast(engine).getDriver().getShaderModel();
+    if (!shaderModels.test(static_cast<uint32_t>(shaderModel))) {
+        CString name;
+        materialParser->getName(&name);
+        slog.e << "The material '" << name.c_str_safe() << "' was not built for ";
+        switch (shaderModel) {
+            case backend::ShaderModel::GL_ES_30: slog.e << "mobile.\n"; break;
+            case backend::ShaderModel::GL_CORE_41: slog.e << "desktop.\n"; break;
+            case backend::ShaderModel::UNKNOWN: /* should never happen */ break;
+        }
+        slog.e << "Compiled material contains shader models 0x"
+                << io::hex << shaderModels.getValue() << io::dec << "." << io::endl;
         return nullptr;
     }
 
@@ -117,26 +131,36 @@ FMaterial::FMaterial(FEngine& engine, const Material::Builder& builder)
     UTILS_UNUSED_IN_RELEASE bool uibOK = parser->getUIB(&mUniformInterfaceBlock);
     assert(uibOK);
 
-    // Sampler bindings are only required for Vulkan.
-    UTILS_UNUSED_IN_RELEASE bool sbOK = parser->getSamplerBindingMap(&mSamplerBindings);
-    assert(engine.getBackend() == Backend::OPENGL || sbOK);
+    // Populate sampler bindings for the backend that will consume this Material.
+    mSamplerBindings.populate(&mSamplerInterfaceBlock);
 
     parser->getShading(&mShading);
     parser->getBlendingMode(&mBlendingMode);
     parser->getInterpolation(&mInterpolation);
     parser->getVertexDomain(&mVertexDomain);
     parser->getRequiredAttributes(&mRequiredAttributes);
+
     if (mBlendingMode == BlendingMode::MASKED) {
-        parser->getMaskThreshold(&mMaskTreshold);
+        parser->getMaskThreshold(&mMaskThreshold);
     }
+
+    // The fade blending mode only affects shading. For proper sorting we need to
+    // treat this blending mode as a regular transparent blending operation.
+    if (UTILS_UNLIKELY(mBlendingMode == BlendingMode::FADE)) {
+        mRenderBlendingMode = BlendingMode::TRANSPARENT;
+    } else {
+        mRenderBlendingMode = mBlendingMode;
+    }
+
     if (mShading == Shading::UNLIT) {
         parser->hasShadowMultiplier(&mHasShadowMultiplier);
     }
+
     mIsVariantLit = mShading != Shading::UNLIT || mHasShadowMultiplier;
 
     // create raster state
-    using BlendFunction = Driver::RasterState::BlendFunction;
-    using DepthFunc = Driver::RasterState::DepthFunc;
+    using BlendFunction = RasterState::BlendFunction;
+    using DepthFunc = RasterState::DepthFunc;
     switch (mBlendingMode) {
         case BlendingMode::OPAQUE:
         case BlendingMode::MASKED:
@@ -254,7 +278,7 @@ bool FMaterial::hasParameter(const char* name) const noexcept {
     return true;
 }
 
-Handle<HwProgram> FMaterial::getProgramSlow(uint8_t variantKey) const noexcept {
+backend::Handle<backend::HwProgram> FMaterial::getProgramSlow(uint8_t variantKey) const noexcept {
     const ShaderModel sm = mEngine.getDriver().getShaderModel();
 
     assert(!Variant::isReserved(variantKey));
@@ -268,15 +292,13 @@ Handle<HwProgram> FMaterial::getProgramSlow(uint8_t variantKey) const noexcept {
 
     filaflat::ShaderBuilder& vsBuilder = mEngine.getVertexShaderBuilder();
 
-    UTILS_UNUSED_IN_RELEASE bool vsOK = mMaterialParser->getShader(sm,
-            vertexVariantKey, ShaderType::VERTEX, vsBuilder);
+    UTILS_UNUSED_IN_RELEASE bool vsOK = mMaterialParser->getShader(vsBuilder, sm,
+            vertexVariantKey, ShaderType::VERTEX);
 
     ASSERT_POSTCONDITION(vsOK && vsBuilder.size() > 0,
             "The material '%s' has not been compiled to include the required "
             "GLSL or SPIR-V chunks for the vertex shader (variant=0x%x, filtered=0x%x).",
             mName.c_str(), variantKey, vertexVariantKey);
-
-    CString vs(vsBuilder.getShader(), (CString::size_type) vsBuilder.size());
 
     /*
      * Fragment shader
@@ -284,30 +306,48 @@ Handle<HwProgram> FMaterial::getProgramSlow(uint8_t variantKey) const noexcept {
 
     filaflat::ShaderBuilder& fsBuilder = mEngine.getFragmentShaderBuilder();
 
-    UTILS_UNUSED_IN_RELEASE bool fsOK = mMaterialParser->getShader(sm,
-            fragmentVariantKey, ShaderType::FRAGMENT, fsBuilder);
+    UTILS_UNUSED_IN_RELEASE bool fsOK = mMaterialParser->getShader(fsBuilder, sm,
+            fragmentVariantKey, ShaderType::FRAGMENT);
 
     ASSERT_POSTCONDITION(fsOK && fsBuilder.size() > 0,
             "The material '%s' has not been compiled to include the required "
             "GLSL or SPIR-V chunks for the fragment shader (variant=0x%x, filterer=0x%x).",
             mName.c_str(), variantKey, fragmentVariantKey);
-    CString fs(fsBuilder.getShader(), (CString::size_type) fsBuilder.size());
 
     Program pb;
     pb      .diagnostics(mName, variantKey)
-            .withVertexShader(vs)
-            .withFragmentShader(fs)
-            .withSamplerBindings(&mSamplerBindings)
-            .addUniformBlock(BindingPoints::PER_VIEW, &UibGenerator::getPerViewUib())
-            .addUniformBlock(BindingPoints::LIGHTS, &UibGenerator::getLightsUib())
-            .addUniformBlock(BindingPoints::PER_RENDERABLE, &UibGenerator::getPerRenderableUib())
-            .addUniformBlock(BindingPoints::PER_MATERIAL_INSTANCE, &mUniformInterfaceBlock)
-            .addSamplerBlock(BindingPoints::PER_VIEW, &SibGenerator::getPerViewSib())
-            .addSamplerBlock(BindingPoints::PER_MATERIAL_INSTANCE, &mSamplerInterfaceBlock);
+            .withVertexShader(vsBuilder.data(), vsBuilder.size())
+            .withFragmentShader(fsBuilder.data(), fsBuilder.size())
+            .setUniformBlock(BindingPoints::PER_VIEW, UibGenerator::getPerViewUib().getName())
+            .setUniformBlock(BindingPoints::LIGHTS, UibGenerator::getLightsUib().getName())
+            .setUniformBlock(BindingPoints::PER_RENDERABLE, UibGenerator::getPerRenderableUib().getName())
+            .setUniformBlock(BindingPoints::PER_MATERIAL_INSTANCE, mUniformInterfaceBlock.getName());
 
     if (Variant(variantKey).hasSkinning()) {
-        pb.addUniformBlock(BindingPoints::PER_RENDERABLE_BONES, &UibGenerator::getPerRenderableBonesUib());
+        pb.setUniformBlock(BindingPoints::PER_RENDERABLE_BONES,
+                UibGenerator::getPerRenderableBonesUib().getName());
     }
+
+    auto addSamplerGroup = [&pb]
+            (uint8_t bindingPoint, SamplerInterfaceBlock const& sib, SamplerBindingMap const& map) {
+        const size_t samplerCount = sib.getSize();
+        if (samplerCount) {
+            std::vector<Program::Sampler> samplers(samplerCount);
+            auto const& list = sib.getSamplerInfoList();
+            for (size_t i = 0, c = samplerCount; i < c; ++i) {
+                CString uniformName(
+                        SamplerInterfaceBlock::getUniformName(sib.getName().c_str(),
+                                list[i].name.c_str()));
+                uint8_t binding;
+                map.getSamplerBinding(bindingPoint, (uint8_t)i, &binding);
+                samplers[i] = { std::move(uniformName), binding };
+            }
+            pb.setSamplerGroup(bindingPoint, samplers.data(), samplers.size());
+        }
+    };
+
+    addSamplerGroup(BindingPoints::PER_VIEW, SibGenerator::getPerViewSib(), mSamplerBindings);
+    addSamplerGroup(BindingPoints::PER_MATERIAL_INSTANCE, mSamplerInterfaceBlock, mSamplerBindings);
 
     auto program = mEngine.getDriverApi().createProgram(std::move(pb));
     assert(program);

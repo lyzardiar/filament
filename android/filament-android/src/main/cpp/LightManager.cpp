@@ -64,10 +64,17 @@ Java_com_google_android_filament_LightManager_nBuilderCastShadows(JNIEnv *env, j
 
 extern "C" JNIEXPORT void JNICALL
 Java_com_google_android_filament_LightManager_nBuilderShadowOptions(JNIEnv *env, jclass type,
-        jlong nativeBuilder, jint mapSize, jfloat constantBias, jfloat normalBias, jfloat shadowFar) {
+        jlong nativeBuilder, jint mapSize, jfloat constantBias, jfloat normalBias, jfloat shadowFar,
+        jfloat shadowNearHint, jfloat shadowFarHint, jboolean stable) {
     LightManager::Builder *builder = (LightManager::Builder *) nativeBuilder;
     builder->shadowOptions(
-            LightManager::ShadowOptions{(uint32_t) mapSize, constantBias, normalBias, shadowFar});
+            LightManager::ShadowOptions{.mapSize = (uint32_t)mapSize,
+                                        .constantBias = constantBias,
+                                        .normalBias = normalBias,
+                                        .shadowFar = shadowFar,
+                                        .shadowNearHint = shadowNearHint,
+                                        .shadowFarHint = shadowFarHint,
+                                        .stable = (bool)stable});
 }
 
 extern "C" JNIEXPORT void JNICALL
@@ -155,6 +162,13 @@ Java_com_google_android_filament_LightManager_nBuilderBuild(JNIEnv *env, jclass 
     return jboolean(builder->build(*engine, (Entity &) entity) == LightManager::Builder::Success);
 }
 
+extern "C" JNIEXPORT jint JNICALL
+Java_com_google_android_filament_LightManager_nGetType(JNIEnv* env,
+        jclass type, jlong nativeLightManager, jint i) {
+    LightManager *lm = (LightManager *) nativeLightManager;
+    return (jint)lm->getType((LightManager::Instance) i);
+}
+
 extern "C" JNIEXPORT void JNICALL
 Java_com_google_android_filament_LightManager_nSetPosition(JNIEnv *env, jclass type,
         jlong nativeLightManager, jint i, jfloat x, jfloat y, jfloat z) {
@@ -167,7 +181,7 @@ Java_com_google_android_filament_LightManager_nGetPosition(JNIEnv *env, jclass t
         jlong nativeLightManager, jint i, jfloatArray out_) {
     LightManager *lm = (LightManager *) nativeLightManager;
     jfloat *out = env->GetFloatArrayElements(out_, NULL);
-    *reinterpret_cast<math::float3 *>(out) = lm->getPosition((LightManager::Instance) i);
+    *reinterpret_cast<filament::math::float3 *>(out) = lm->getPosition((LightManager::Instance) i);
     env->ReleaseFloatArrayElements(out_, out, 0);
 }
 
@@ -183,7 +197,7 @@ Java_com_google_android_filament_LightManager_nGetDirection(JNIEnv *env, jclass 
         jlong nativeLightManager, jint i, jfloatArray out_) {
     LightManager *lm = (LightManager *) nativeLightManager;
     jfloat *out = env->GetFloatArrayElements(out_, NULL);
-    *reinterpret_cast<math::float3 *>(out) = lm->getDirection((LightManager::Instance) i);
+    *reinterpret_cast<filament::math::float3 *>(out) = lm->getDirection((LightManager::Instance) i);
     env->ReleaseFloatArrayElements(out_, out, 0);
 }
 
@@ -199,7 +213,7 @@ Java_com_google_android_filament_LightManager_nGetColor(JNIEnv *env, jclass type
         jlong nativeLightManager, jint i, jfloatArray out_) {
     LightManager *lm = (LightManager *) nativeLightManager;
     jfloat *out = env->GetFloatArrayElements(out_, NULL);
-    *reinterpret_cast<math::float3 *>(out) = lm->getColor((LightManager::Instance) i);
+    *reinterpret_cast<filament::math::float3 *>(out) = lm->getColor((LightManager::Instance) i);
     env->ReleaseFloatArrayElements(out_, out, 0);
 }
 

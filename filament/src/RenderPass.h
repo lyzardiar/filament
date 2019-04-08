@@ -23,7 +23,7 @@
 #include "details/Material.h"
 #include "details/Scene.h"
 
-#include "driver/DriverApiForward.h"
+#include "private/backend/DriverApiForward.h"
 
 #include <private/filament/Variant.h>
 
@@ -172,14 +172,14 @@ public:
         return boolish ? -1llu : 0llu;
     }
 
-    struct PrimitiveInfo { // 28 bytes
-        FMaterialInstance const* mi = nullptr;              // 8 bytes (4)
-        Handle<HwRenderPrimitive> primitiveHandle;          // 4 bytes
-        Handle<HwUniformBuffer> perRenderableUniforms;      // 4 bytes
-        Handle<HwUniformBuffer> perRenderableBones;         // 4 bytes
-        Driver::RasterState rasterState;                    // 4 bytes
-        Variant materialVariant;                            // 1 byte
-        uint8_t reserved[3] = { };                          // 3 bytes (that helps the compiler)
+    struct PrimitiveInfo { // 24 bytes
+        FMaterialInstance const* mi = nullptr;                          // 8 bytes (4)
+        backend::Handle<backend::HwRenderPrimitive> primitiveHandle;    // 4 bytes
+        backend::Handle<backend::HwUniformBuffer> perRenderableBones;   // 4 bytes
+        backend::RasterState rasterState;                               // 4 bytes
+        uint16_t index = 0;                                             // 2 bytes
+        Variant materialVariant;                                        // 1 byte
+        uint8_t reserved = {};                                          // 1 byte
     };
 
     struct alignas(8) Command {     // 32 bytes
@@ -195,35 +195,29 @@ public:
     static_assert(std::is_trivially_destructible<Command>::value,
             "Command isn't trivially destructible");
 
-
     using RenderFlags = uint8_t;
-    static constexpr RenderFlags HAS_SHADOWING          = 0x01;
-    static constexpr RenderFlags HAS_DIRECTIONAL_LIGHT  = 0x02;
-    static constexpr RenderFlags HAS_DYNAMIC_LIGHTING   = 0x04;
+    static constexpr RenderFlags HAS_SHADOWING           = 0x01;
+    static constexpr RenderFlags HAS_DIRECTIONAL_LIGHT   = 0x02;
+    static constexpr RenderFlags HAS_DYNAMIC_LIGHTING    = 0x04;
+    static constexpr RenderFlags HAS_INVERSE_FRONT_FACES = 0x08;
 
 
-    RenderPass(const char* name) noexcept : mName(name) { }
+    RenderPass(FEngine& engine, utils::GrowingSlice<Command>& commands) noexcept;
+    void setGeometry(FScene& scene, utils::Range<uint32_t> vr) noexcept;
+    void setCamera(const CameraInfo& camera) noexcept;
+    void setRenderFlags(RenderFlags flags) noexcept;
+    void setExecuteSync(utils::JobSystem::Job* sync) noexcept;
+    void generateSortedCommands(CommandTypeFlags commandType) noexcept;
+    void execute(const char* name,
+            backend::Handle <backend::HwRenderTarget> renderTarget,
+            backend::RenderPassParams params,
+            Command const* first, Command const* last) const noexcept;
 
-    virtual ~RenderPass() noexcept;
+    utils::GrowingSlice<Command>& getCommands() { return mCommands; }
 
-    // appends rendering commands for the given view
-    void render(
-            FEngine& engine, utils::JobSystem& js,
-            FScene::RenderableSoa const& soa, utils::Range<uint32_t> visibleRenderables,
-            uint32_t commandTypeFlags, RenderFlags renderFlags,
-            const CameraInfo& camera, Viewport const& viewport,
-            utils::GrowingSlice<Command>& commands) noexcept;
-
-private:
-    // Called just before rendering, make sure all needed asynchronous tasks are finished.
-    // Set-up the render-target as needed. At least call driver.beginRenderPass().
-    virtual void beginRenderPass(
-            driver::DriverApi& driver, Viewport const& viewport,
-            const CameraInfo& camera) noexcept = 0;
-
-    // Called just after rendering. Do what you have to do,
-    // but at least call driver.endRenderPass().
-    virtual void endRenderPass(driver::DriverApi& driver, Viewport const& viewport) noexcept = 0;
+    size_t getCommandsHighWatermark() const noexcept {
+        return mCommandsHighWatermark * sizeof(Command);
+    }
 
 private:
     friend class FRenderer;
@@ -237,7 +231,7 @@ private:
     static_assert(JOBS_PARALLEL_FOR_COMMANDS_SIZE % utils::CACHELINE_SIZE == 0,
             "Size of Commands jobs must be multiple of a cache-line size");
 
-    static inline void generateCommands(uint32_t commandTypeFlags, Command* const commands,
+    static inline void generateCommands(uint32_t commandTypeFlags, Command* commands,
             FScene::RenderableSoa const& soa, utils::Range<uint32_t> range, RenderFlags renderFlags,
             math::float3 cameraPosition, math::float3 cameraForward) noexcept;
 
@@ -247,15 +241,23 @@ private:
             math::float3 cameraForward) noexcept;
 
     static void setupColorCommand(Command& cmdDraw, bool hasDepthPass,
-            FMaterialInstance const* const mi) noexcept;
+            FMaterialInstance const* mi) noexcept;
 
-    static void recordDriverCommands(FEngine::DriverApi& driver,
-            utils::Slice<Command> const& commands) noexcept;
+    static void recordDriverCommands(FEngine::DriverApi& driver, FScene& scene,
+            const Command* first, const Command* last) noexcept;
 
     static void updateSummedPrimitiveCounts(
             FScene::RenderableSoa& renderableData, utils::Range<uint32_t> vr) noexcept;
 
-    const char* const mName;
+
+    FEngine& mEngine;
+    utils::GrowingSlice<Command>& mCommands;
+    FScene* mScene = nullptr;
+    utils::Range<uint32_t> mVisibleRenderables{};
+    CameraInfo mCamera;
+    RenderFlags mFlags{};
+    utils::JobSystem::Job* mSync = nullptr;
+    size_t mCommandsHighWatermark = 0;
 };
 
 } // namespace details

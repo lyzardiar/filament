@@ -26,7 +26,7 @@
 namespace filament {
 
 using namespace details;
-using namespace driver;
+using namespace backend;
 
 struct Texture::BuilderDetails {
     uint32_t mWidth = 1;
@@ -35,6 +35,7 @@ struct Texture::BuilderDetails {
     uint8_t mLevels = 1;
     Sampler mTarget = Sampler::SAMPLER_2D;
     InternalFormat mFormat = InternalFormat::RGBA8;
+    bool mRgbm = false;
     Usage mUsage = Usage::DEFAULT;
 };
 
@@ -77,6 +78,11 @@ Texture::Builder& Texture::Builder::format(Texture::InternalFormat format) noexc
     return *this;
 }
 
+Texture::Builder& Texture::Builder::rgbm(bool enabled) noexcept {
+    mImpl->mRgbm = enabled;
+    return *this;
+}
+
 Texture::Builder& Texture::Builder::usage(Texture::Usage usage) noexcept {
     mImpl->mUsage = usage;
     return *this;
@@ -98,6 +104,7 @@ FTexture::FTexture(FEngine& engine, const Builder& builder) {
     mWidth  = static_cast<uint32_t>(builder->mWidth);
     mHeight = static_cast<uint32_t>(builder->mHeight);
     mFormat = builder->mFormat;
+    mRgbm = builder->mRgbm;
     mUsage = builder->mUsage;
     mTarget = builder->mTarget;
     mDepth  = static_cast<uint32_t>(builder->mDepth);
@@ -136,7 +143,7 @@ void FTexture::setImage(FEngine& engine,
         Texture::PixelBufferDescriptor&& buffer) const noexcept {
     if (!mStream && mTarget != Sampler::SAMPLER_CUBEMAP && level < mLevels) {
         if (buffer.buffer) {
-            engine.getDriverApi().load2DImage(mHandle,
+            engine.getDriverApi().update2DImage(mHandle,
                     uint8_t(level), xoffset, yoffset, width, height, std::move(buffer));
         }
     }
@@ -146,7 +153,7 @@ void FTexture::setImage(FEngine& engine, size_t level,
         Texture::PixelBufferDescriptor&& buffer, const FaceOffsets& faceOffsets) const noexcept {
     if (!mStream && mTarget == Sampler::SAMPLER_CUBEMAP && level < mLevels) {
         if (buffer.buffer) {
-            engine.getDriverApi().loadCubeImage(mHandle, uint8_t(level),
+            engine.getDriverApi().updateCubeImage(mHandle, uint8_t(level),
                     std::move(buffer), faceOffsets);
         }
     }
@@ -168,14 +175,74 @@ void FTexture::setExternalStream(FEngine& engine, FStream* stream) noexcept {
         engine.getDriverApi().setExternalStream(mHandle, stream->getHandle());
     } else {
         mStream = nullptr;
-        engine.getDriverApi().setExternalStream(mHandle, Handle<HwStream>());
+        engine.getDriverApi().setExternalStream(mHandle, backend::Handle<backend::HwStream>());
+    }
+}
+
+static bool isColorRenderable(FEngine& engine, Texture::InternalFormat format) {
+    switch (format) {
+        case Texture::InternalFormat::DEPTH16:
+        case Texture::InternalFormat::DEPTH24:
+        case Texture::InternalFormat::DEPTH32F:
+        case Texture::InternalFormat::DEPTH24_STENCIL8:
+        case Texture::InternalFormat::DEPTH32F_STENCIL8:
+            return false;
+        default:
+            return engine.getDriverApi().isRenderTargetFormatSupported(format);
     }
 }
 
 void FTexture::generateMipmaps(FEngine& engine) const noexcept {
-    if ((mTarget == Sampler::SAMPLER_2D || mTarget == Sampler::SAMPLER_CUBEMAP)
-            && mLevels > 1) {
-        engine.getDriverApi().generateMipmaps(mHandle);
+    // The OpenGL spec for GenerateMipmap stipulates that it returns INVALID_OPERATION unless
+    // the sized internal format is both color-renderable and texture-filterable.
+    if (!ASSERT_POSTCONDITION_NON_FATAL(isColorRenderable(engine, mFormat),
+            "Texture format must be color renderable")) {
+        return;
+    }
+    if (mLevels == 1 || (mWidth == 1 && mHeight == 1)) {
+        return;
+    }
+
+    if (engine.getDriverApi().canGenerateMipmaps()) {
+         engine.getDriverApi().generateMipmaps(mHandle);
+         return;
+    }
+
+    auto generateMipsForLayer = [this, &engine](uint16_t layer) {
+        FEngine::DriverApi& driver = engine.getDriverApi();
+
+        // Wrap miplevel 0 in a render target so that we can use it as a blit source.
+        uint8_t level = 0;
+        uint32_t srcw = mWidth;
+        uint32_t srch = mHeight;
+        backend::Handle<backend::HwRenderTarget> srcrth = driver.createRenderTarget(TargetBufferFlags::COLOR,
+                srcw, srch, mSampleCount, mFormat, { mHandle, level++, layer }, {}, {});
+
+        // Perform a blit for all miplevels down to 1x1.
+        backend::Handle<backend::HwRenderTarget> dstrth;
+        do {
+            uint32_t dstw = std::max(srcw >> 1, 1u);
+            uint32_t dsth = std::max(srch >> 1, 1u);
+            dstrth = driver.createRenderTarget(TargetBufferFlags::COLOR, dstw, dsth, mSampleCount,
+                    mFormat, { mHandle, level++, layer }, {}, {});
+            driver.blit(TargetBufferFlags::COLOR,
+                    dstrth, { 0, 0, dstw, dsth },
+                    srcrth, { 0, 0, srcw, srch },
+                    SamplerMagFilter::LINEAR);
+            driver.destroyRenderTarget(srcrth);
+            srcrth = dstrth;
+            srcw = dstw;
+            srch = dsth;
+        } while ((srcw > 1 || srch > 1) && level < mLevels);
+        driver.destroyRenderTarget(dstrth);
+    };
+
+    if (mTarget == Sampler::SAMPLER_2D) {
+        generateMipsForLayer(0);
+    } else if (mTarget == Sampler::SAMPLER_CUBEMAP) {
+        for (uint16_t layer = 0; layer < 6; ++layer) {
+            generateMipsForLayer(layer);
+        }
     }
 }
 
@@ -234,7 +301,6 @@ size_t FTexture::getFormatSize(InternalFormat format) noexcept {
         case TextureFormat::RGBA8:
         case TextureFormat::SRGB8_A8:
         case TextureFormat::RGBA8_SNORM:
-        case TextureFormat::RGBM:
         case TextureFormat::RGB10_A2:
         case TextureFormat::RGBA8UI:
         case TextureFormat::RGBA8I:
@@ -306,6 +372,10 @@ Texture::Sampler Texture::getTarget() const noexcept {
 
 Texture::InternalFormat Texture::getFormat() const noexcept {
     return upcast(this)->getFormat();
+}
+
+bool Texture::isRgbm() const noexcept {
+    return upcast(this)->isRgbm();
 }
 
 void Texture::setImage(Engine& engine, size_t level,

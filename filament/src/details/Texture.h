@@ -19,7 +19,7 @@
 
 #include "upcast.h"
 
-#include "driver/Handle.h"
+#include <backend/Handle.h>
 
 #include <filament/Texture.h>
 
@@ -42,7 +42,7 @@ public:
     // frees driver resources, object becomes invalid
     void terminate(FEngine& engine);
 
-    Handle<HwTexture> getHwHandle() const noexcept { return mHandle; }
+    backend::Handle<backend::HwTexture> getHwHandle() const noexcept { return mHandle; }
 
     size_t getWidth(size_t level = 0) const noexcept;
     size_t getHeight(size_t level = 0) const noexcept;
@@ -50,6 +50,7 @@ public:
     size_t getLevels() const noexcept { return mLevels; }
     Sampler getTarget() const noexcept { return mTarget; }
     InternalFormat getFormat() const noexcept { return mFormat; }
+    bool isRgbm() const noexcept { return mRgbm; }
 
     void setImage(FEngine& engine, size_t level,
             uint32_t xoffset, uint32_t yoffset, uint32_t width, uint32_t height,
@@ -75,11 +76,12 @@ public:
 
 private:
     friend class Texture;
-    Handle<HwTexture> mHandle;
+    backend::Handle<backend::HwTexture> mHandle;
     uint32_t mWidth = 1;
     uint32_t mHeight = 1;
     uint32_t mDepth = 1;
     InternalFormat mFormat = InternalFormat::RGBA8;
+    bool mRgbm = false;
     Sampler mTarget = Sampler::SAMPLER_2D;
     uint8_t mLevels = 1;
     uint8_t mSampleCount = 1;

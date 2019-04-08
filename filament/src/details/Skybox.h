@@ -16,13 +16,13 @@
 
 #include "upcast.h"
 
-#include "driver/Handle.h"
+#include <backend/Handle.h>
 
 #include <components/RenderableManager.h>
 
 #include <filament/Skybox.h>
 
-#include <filament/driver/DriverEnums.h>
+#include <backend/DriverEnums.h>
 
 #include <utils/compiler.h>
 #include <utils/Entity.h>
@@ -42,7 +42,7 @@ class FSkybox : public Skybox {
 public:
     FSkybox(FEngine& engine, const Builder& builder) noexcept;
 
-    static FMaterial const* createMaterial(FEngine& engine, driver::TextureFormat format);
+    static FMaterial const* createMaterial(FEngine& engine, bool rgbm);
 
     void terminate(FEngine& engine) noexcept;
 

@@ -44,18 +44,12 @@
 #include "Cube.h"
 #include "NativeWindowHelper.h"
 
+#include "generated/resources/resources.h"
+
 using namespace filament;
 using namespace filagui;
-using namespace math;
+using namespace filament::math;
 using namespace utils;
-
-static constexpr uint8_t TRANSPARENT_COLOR_PACKAGE[] = {
-    #include "generated/material/transparentColor.inc"
-};
-
-static constexpr uint8_t DEPTH_VISUALIZER_PACKAGE[] = {
-    #include "generated/material/depthVisualizer.inc"
-};
 
 FilamentApp& FilamentApp::get() {
     static FilamentApp filamentApp;
@@ -70,24 +64,26 @@ FilamentApp::~FilamentApp() {
     SDL_Quit();
 }
 
-void FilamentApp::run(const Config& config,SetupCallback setupCallback,
+void FilamentApp::run(const Config& config, SetupCallback setupCallback,
         CleanupCallback cleanupCallback, ImGuiCallback imguiCallback,
         PreRenderCallback preRender, PostRenderCallback postRender,
         size_t width, size_t height) {
-    mEngine = Engine::create(config.backend);
-
-      mDepthMaterial = Material::Builder()
-              .package((void*) DEPTH_VISUALIZER_PACKAGE, sizeof(DEPTH_VISUALIZER_PACKAGE))
-              .build(*mEngine);
-
-      mDepthMI = mDepthMaterial->createInstance();
-
-      mTransparentMaterial = Material::Builder()
-              .package((void*) TRANSPARENT_COLOR_PACKAGE, sizeof(TRANSPARENT_COLOR_PACKAGE))
-              .build(*mEngine);
-
     std::unique_ptr<FilamentApp::Window> window(
             new FilamentApp::Window(this, config, config.title, width, height));
+
+    mDepthMaterial = Material::Builder()
+            .package(RESOURCES_DEPTHVISUALIZER_DATA, RESOURCES_DEPTHVISUALIZER_SIZE)
+            .build(*mEngine);
+
+    mDepthMI = mDepthMaterial->createInstance();
+
+    mDefaultMaterial = Material::Builder()
+            .package(RESOURCES_AIDEFAULTMAT_DATA, RESOURCES_AIDEFAULTMAT_SIZE)
+            .build(*mEngine);
+
+    mTransparentMaterial = Material::Builder()
+            .package(RESOURCES_TRANSPARENTCOLOR_DATA, RESOURCES_TRANSPARENTCOLOR_SIZE)
+            .build(*mEngine);
 
     std::unique_ptr<Cube> cameraCube(new Cube(*mEngine, mTransparentMaterial, {1,0,0}));
     // we can't cull the light-frustum because it's not applied a rigid transform
@@ -155,7 +151,8 @@ void FilamentApp::run(const Config& config,SetupCallback setupCallback,
     setupCallback(mEngine, window->mMainView->getView(), mScene);
 
     if (imguiCallback) {
-        mImGuiHelper = std::make_unique<ImGuiHelper>(mEngine, window->mUiView->getView());
+        mImGuiHelper = std::make_unique<ImGuiHelper>(mEngine, window->mUiView->getView(),
+            getRootPath() + "assets/fonts/Roboto-Medium.ttf");
         ImGuiIO& io = ImGui::GetIO();
         #ifdef WIN32
             SDL_SysWMinfo wmInfo;
@@ -195,7 +192,20 @@ void FilamentApp::run(const Config& config,SetupCallback setupCallback,
 
     bool mousePressed[3] = { false };
 
+    int sidebarWidth = mSidebarWidth;
+
+    SDL_EventState(SDL_DROPFILE, SDL_ENABLE);
+
     while (!mClosed) {
+
+        if (mSidebarWidth != sidebarWidth) {
+            window->configureCamerasForWindow();
+            sidebarWidth = mSidebarWidth;
+        }
+
+        if (!UTILS_HAS_THREADING) {
+            mEngine->execute();
+        }
 
         // Allow the app to animate the scene if desired.
         if (mAnimation) {
@@ -276,6 +286,12 @@ void FilamentApp::run(const Config& config,SetupCallback setupCallback,
                     if (!io || !io->WantCaptureMouse)
                         window->mouseMoved(event.motion.x, event.motion.y);
                     break;
+                case SDL_DROPFILE:
+                    if (mDropHandler) {
+                        mDropHandler(event.drop.file);
+                    }
+                    SDL_free(event.drop.file);
+                    break;
                 case SDL_WINDOWEVENT:
                     switch (event.window.event) {
                         case SDL_WINDOWEVENT_RESIZED:
@@ -349,6 +365,8 @@ void FilamentApp::run(const Config& config,SetupCallback setupCallback,
                 renderer->render(view->getView());
             }
             renderer->endFrame();
+        } else {
+            ++mSkippedFrames;
         }
 
         if (postRender) {
@@ -373,6 +391,7 @@ void FilamentApp::run(const Config& config,SetupCallback setupCallback,
     mIBL.reset();
     mEngine->destroy(mDepthMI);
     mEngine->destroy(mDepthMaterial);
+    mEngine->destroy(mDefaultMaterial);
     mEngine->destroy(mTransparentMaterial);
     mEngine->destroy(mScene);
     Engine::destroy(&mEngine);
@@ -413,19 +432,37 @@ FilamentApp::Window::Window(FilamentApp* filamentApp,
         : mFilamentApp(filamentApp) {
     const int x = SDL_WINDOWPOS_CENTERED;
     const int y = SDL_WINDOWPOS_CENTERED;
-    const uint32_t windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE
-            | SDL_WINDOW_ALLOW_HIGHDPI | SDL_WINDOW_OPENGL;
+    const uint32_t windowFlags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
     mWindow = SDL_CreateWindow(title.c_str(), x, y, (int) w, (int) h, windowFlags);
 
-    // HACK: We don't use SDL's 2D rendering functionality, but by invoking it we cause
-    // SDL to create a Metal backing layer, which allows us to run Vulkan apps via MoltenVK.
-    #if defined(FILAMENT_DRIVER_SUPPORTS_VULKAN) && defined(__APPLE__)
-    constexpr int METAL_DRIVER = 2;
-    SDL_CreateRenderer(mWindow, METAL_DRIVER, SDL_RENDERER_ACCELERATED);
-    #endif
+    // Create the Engine after the window in case this happens to be a single-threaded platform.
+    // For single-threaded platforms, we need to ensure that Filament's OpenGL context is current,
+    // rather than the one created by SDL.
+    mFilamentApp->mEngine = Engine::create(config.backend);
+    mBackend = config.backend;
 
     void* nativeWindow = ::getNativeWindow(mWindow);
-    mSwapChain = mFilamentApp->mEngine->createSwapChain(nativeWindow);
+    void* nativeSwapChain = nativeWindow;
+
+#if defined(__APPLE__)
+
+    void* metalLayer = nullptr;
+    if (config.backend == filament::Engine::Backend::METAL) {
+        metalLayer = setUpMetalLayer(nativeWindow);
+        // The swap chain on Metal is a CAMetalLayer.
+        nativeSwapChain = metalLayer;
+    }
+
+#if defined(FILAMENT_DRIVER_SUPPORTS_VULKAN)
+    if (config.backend == filament::Engine::Backend::VULKAN) {
+        // We request a Metal layer for rendering via MoltenVK.
+        setUpMetalLayer(nativeWindow);
+    }
+#endif
+
+#endif
+
+    mSwapChain = mFilamentApp->mEngine->createSwapChain(nativeSwapChain);
     mRenderer = mFilamentApp->mEngine->createRenderer();
 
     // create cameras
@@ -544,7 +581,27 @@ void FilamentApp::Window::fixupMouseCoordinatesForHdpi(ssize_t& x, ssize_t& y) c
 
 void FilamentApp::Window::resize() {
     mFilamentApp->mEngine->destroy(mSwapChain);
-    mSwapChain = mFilamentApp->mEngine->createSwapChain(::getNativeWindow(mWindow));
+    void* nativeWindow = ::getNativeWindow(mWindow);
+    void* nativeSwapChain = nativeWindow;
+
+#if defined(__APPLE__)
+
+    void* metalLayer = nullptr;
+    if (mBackend == filament::Engine::Backend::METAL) {
+        metalLayer = resizeMetalLayer(nativeWindow);
+        // The swap chain on Metal is a CAMetalLayer.
+        nativeSwapChain = metalLayer;
+    }
+
+#if defined(FILAMENT_DRIVER_SUPPORTS_VULKAN)
+    if (mBackend == filament::Engine::Backend::VULKAN) {
+        resizeMetalLayer(nativeWindow);
+    }
+#endif
+
+#endif
+
+    mSwapChain = mFilamentApp->mEngine->createSwapChain(nativeSwapChain);
     configureCamerasForWindow();
 }
 
@@ -565,10 +622,11 @@ void FilamentApp::Window::configureCamerasForWindow() {
 
     const float3 at(0, 0, -4);
     const double ratio = double(h) / double(w);
+    const int sidebar = mFilamentApp->mSidebarWidth * dpiScaleX;
 
     double near = 0.1;
     double far = 50;
-    mMainCamera->setProjection(45.0, double(w) / h, near, far, Camera::Fov::VERTICAL);
+    mMainCamera->setProjection(45.0, double(w - sidebar) / h, near, far, Camera::Fov::VERTICAL);
     mDebugCamera->setProjection(45.0, double(w) / h, 0.0625, 4096, Camera::Fov::VERTICAL);
     mOrthoCamera->setProjection(Camera::Projection::ORTHO, -3, 3, -3 * ratio, 3 * ratio, near, far);
     mOrthoCamera->lookAt(at + float3{ 4, 0, 0 }, at);
@@ -591,7 +649,7 @@ void FilamentApp::Window::configureCamerasForWindow() {
         mGodView->getCameraManipulator()->updateCameraTransform();
         mOrthoView->getCameraManipulator()->updateCameraTransform();
     } else {
-        mMainView->setViewport({ 0, 0, w, h });
+        mMainView->setViewport({ sidebar, 0, w - sidebar, h });
     }
     mUiView->setViewport({ 0, 0, w, h });
 }

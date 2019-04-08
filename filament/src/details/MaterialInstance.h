@@ -18,10 +18,12 @@
 #define TNT_FILAMENT_DETAILS_MATERIALINSTANCE_H
 
 #include "upcast.h"
+#include "UniformBuffer.h"
 #include "details/Engine.h"
-#include "driver/DriverApi.h"
-#include "driver/Handle.h"
-#include "driver/UniformBuffer.h"
+
+#include "private/backend/DriverApi.h"
+
+#include <backend/Handle.h>
 
 #include <utils/compiler.h>
 
@@ -50,14 +52,13 @@ public:
 
     void use(FEngine::DriverApi& driver) const {
         if (mUbHandle) {
-            driver.bindUniforms(BindingPoints::PER_MATERIAL_INSTANCE, mUbHandle);
+            driver.bindUniformBuffer(BindingPoints::PER_MATERIAL_INSTANCE, mUbHandle);
         }
         if (mSbHandle) {
             driver.bindSamplers(BindingPoints::PER_MATERIAL_INSTANCE, mSbHandle);
         }
-        driver.setViewportScissor(
-                mScissorRect[0], mScissorRect[1],
-                uint32_t(mScissorRect[2]), uint32_t(mScissorRect[3]));
+        driver.setViewportScissor(mScissorRect.left, mScissorRect.bottom,
+                mScissorRect.width, mScissorRect.height);
     }
 
     template <typename T>
@@ -73,19 +74,28 @@ public:
 
     uint64_t getSortingKey() const noexcept { return mMaterialSortingKey; }
 
-    SamplerBuffer const& getSamplerBuffer() const noexcept { return mSamplers; }
+    UniformBuffer const& getUniformBuffer() const noexcept { return mUniforms; }
+    backend::SamplerGroup const& getSamplerGroup() const noexcept { return mSamplers; }
 
     void setScissor(int32_t left, int32_t bottom, uint32_t width, uint32_t height) noexcept {
-        mScissorRect[0] = left;
-        mScissorRect[1] = bottom;
-        mScissorRect[2] = (int32_t)std::min(width,  (uint32_t)std::numeric_limits<int32_t>::max());
-        mScissorRect[3] = (int32_t)std::min(height, (uint32_t)std::numeric_limits<int32_t>::max());
+        mScissorRect = { left, bottom,
+                std::min(width, (uint32_t)std::numeric_limits<int32_t>::max()),
+                std::min(height, (uint32_t)std::numeric_limits<int32_t>::max())
+        };
     }
 
     void unsetScissor() noexcept {
-        mScissorRect[0] = mScissorRect[1] = 0;
-        mScissorRect[2] = mScissorRect[3] = std::numeric_limits<int32_t>::max();
+        mScissorRect = { 0, 0,
+                (uint32_t)std::numeric_limits<int32_t>::max(),
+                (uint32_t)std::numeric_limits<int32_t>::max()
+        };
     }
+
+    void setPolygonOffset(float scale, float constant) noexcept {
+        mPolygonOffset = { scale, constant };
+    }
+
+    backend::PolygonOffset getPolygonOffset() const noexcept { return mPolygonOffset; }
 
 private:
     friend class FMaterial;
@@ -98,17 +108,19 @@ private:
 
     // keep these grouped, they're accessed together in the render-loop
     FMaterial const* mMaterial = nullptr;
-    Handle<HwUniformBuffer> mUbHandle;
-    Handle<HwSamplerBuffer> mSbHandle;
+    backend::Handle<backend::HwUniformBuffer> mUbHandle;
+    backend::Handle<backend::HwSamplerGroup> mSbHandle;
 
     UniformBuffer mUniforms;
-    SamplerBuffer mSamplers;
+    backend::SamplerGroup mSamplers;
+    backend::PolygonOffset mPolygonOffset;
 
     uint64_t mMaterialSortingKey = 0;
 
     // Scissor rectangle is specified as: Left Bottom Width Height.
-    int32_t mScissorRect[4] = {
-        0, 0, std::numeric_limits<int32_t>::max(), std::numeric_limits<int32_t>::max()
+    backend::Viewport mScissorRect = { 0, 0,
+            (uint32_t)std::numeric_limits<int32_t>::max(),
+            (uint32_t)std::numeric_limits<int32_t>::max()
     };
 };
 

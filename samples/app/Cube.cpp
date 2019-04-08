@@ -22,10 +22,7 @@
 #include <filament/RenderableManager.h>
 #include <filament/TransformManager.h>
 
-#include <filamat/MaterialBuilder.h>
-
-using namespace math;
-using namespace filamat;
+using namespace filament::math;
 using namespace filament;
 
 const uint32_t Cube::mIndices[] = {
@@ -43,7 +40,7 @@ const uint32_t Cube::mIndices[] = {
         0,4, 1,5, 3,7, 2,6,
 };
 
-const math::float3 Cube::mVertices[] = {
+const filament::math::float3 Cube::mVertices[] = {
         { -1, -1,  1},  // 0. left bottom far
         {  1, -1,  1},  // 1. right bottom far
         { -1,  1,  1},  // 2. left top far
@@ -114,7 +111,7 @@ void Cube::mapFrustum(filament::Engine& engine, Camera const* camera) {
     return mapFrustum(engine, p);
 }
 
-void Cube::mapFrustum(filament::Engine& engine, math::mat4 const& transform) {
+void Cube::mapFrustum(filament::Engine& engine, filament::math::mat4 const& transform) {
     // the Camera far plane is at infinity, but we want it closer for display
     mat4f p(transform);
     auto& tcm = engine.getTransformManager();
@@ -124,7 +121,7 @@ void Cube::mapFrustum(filament::Engine& engine, math::mat4 const& transform) {
 
 
 void Cube::mapAabb(filament::Engine& engine, filament::Box const& box) {
-    mat4 p = mat4::translate(double4{ box.center, 1 }) * mat4::scale(double4{ box.halfExtent, 1 });
+    mat4 p = mat4::translation(box.center) * mat4::scaling(box.halfExtent);
     return mapFrustum(engine, p);
 }
 
@@ -140,8 +137,4 @@ Cube::~Cube() {
     utils::EntityManager& em = utils::EntityManager::get();
     em.destroy(mSolidRenderable);
     em.destroy(mWireFrameRenderable);
-}
-
-VertexBuffer* Cube::getVertexBuffer() {
-    return mVertexBuffer;
 }

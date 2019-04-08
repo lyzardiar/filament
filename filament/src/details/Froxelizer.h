@@ -17,15 +17,19 @@
 #ifndef TNT_FILAMENT_DETAILS_FROXEL_H
 #define TNT_FILAMENT_DETAILS_FROXEL_H
 
+#include "UniformBuffer.h"
+
 #include "details/Allocators.h"
 #include "details/Scene.h"
 #include "details/Engine.h"
 
-#include "driver/Handle.h"
-#include "driver/GPUBuffer.h"
-#include "driver/UniformBuffer.h"
+#include <backend/Handle.h>
+
+#include "GPUBuffer.h"
 
 #include <filament/Viewport.h>
+
+#include <private/filament/UibGenerator.h>
 
 #include <utils/compiler.h>
 #include <utils/bitset.h>
@@ -88,7 +92,7 @@ public:
     explicit Froxelizer(FEngine& engine);
     ~Froxelizer();
 
-    void terminate(driver::DriverApi& driverApi) noexcept;
+    void terminate(backend::DriverApi& driverApi) noexcept;
 
     // gpu buffer containing records. valid after construction.
     GPUBuffer const& getRecordBuffer() const noexcept { return mRecordsBuffer; }
@@ -110,27 +114,29 @@ public:
      *
      * return true if updateUniforms() needs to be called
      */
-    bool prepare(driver::DriverApi& driverApi, ArenaScope& arena, Viewport const& viewport,
+    bool prepare(backend::DriverApi& driverApi, ArenaScope& arena, Viewport const& viewport,
             const math::mat4f& projection, float projectionNear, float projectionFar) noexcept;
 
     Froxel getFroxelAt(size_t x, size_t y, size_t z) const noexcept;
     size_t getFroxelCountX() const noexcept { return mFroxelCountX; }
     size_t getFroxelCountY() const noexcept { return mFroxelCountY; }
     size_t getFroxelCountZ() const noexcept { return mFroxelCountZ; }
+    size_t getFroxelCount() const noexcept { return mFroxelCount; }
 
     // update Records and Froxels texture with lights data. this is thread-safe.
-    void froxelizeLights(FEngine& engine, math::mat4f const& viewMatrix,
+    void froxelizeLights(FEngine& engine, CameraInfo const& camera,
             const FScene::LightSoa& lightData) noexcept;
 
     void updateUniforms(UniformBuffer& u) {
-        u.setUniform(offsetof(FEngine::PerViewUib, zParams), mParamsZ);
-        u.setUniform(offsetof(FEngine::PerViewUib, fParams), mParamsF);
-        u.setUniform(offsetof(FEngine::PerViewUib, oneOverFroxelDimensionX), mOneOverDimension.x);
-        u.setUniform(offsetof(FEngine::PerViewUib, oneOverFroxelDimensionY), mOneOverDimension.y);
+        u.setUniform(offsetof(PerViewUib, zParams), mParamsZ);
+        u.setUniform(offsetof(PerViewUib, fParams), mParamsF.yz);
+        u.setUniform(offsetof(PerViewUib, fParamsX), mParamsF.x);
+        u.setUniform(offsetof(PerViewUib, oneOverFroxelDimensionX), mOneOverDimension.x);
+        u.setUniform(offsetof(PerViewUib, oneOverFroxelDimensionY), mOneOverDimension.y);
     }
 
     // send froxel data to GPU
-    void commit(driver::DriverApi& driverApi);
+    void commit(backend::DriverApi& driverApi);
 
 
     /*
@@ -178,6 +184,18 @@ private:
         float radius;
     };
 
+    struct LightTreeNode {
+        float min;          // lights z-range min
+        float max;          // lights z-range max
+
+        uint16_t next;      // next node when range test fails
+        uint16_t offset;    // offset in record buffer
+
+        uint8_t isLeaf;
+        uint8_t count;      // light count in record buffer
+        uint16_t reserved;
+    };
+
     // The first entry always encodes the type of light, i.e. point/spot
     using FroxelThreadData = std::array<LightGroupType, FROXEL_BUFFER_ENTRY_COUNT_MAX + 1>;
 
@@ -186,13 +204,16 @@ private:
     bool update() noexcept;
 
     void froxelizeLoop(FEngine& engine,
-            const math::mat4f& viewMatrix, const FScene::LightSoa& lightData) noexcept;
+            const CameraInfo& camera, const FScene::LightSoa& lightData) noexcept;
 
     void froxelizeAssignRecordsCompress() noexcept;
 
-    void froxelizePointAndSpotLight(
-            FroxelThreadData& froxelThread, size_t bit,
+    void froxelizePointAndSpotLight(FroxelThreadData& froxelThread, size_t bit,
             math::mat4f const& projection, const LightParams& light) const noexcept;
+
+    static void computeLightTree(LightTreeNode* lightTree,
+            utils::Slice<RecordBufferType> const& lightList,
+            const FScene::LightSoa& lightData, size_t lightRecordsOffset) noexcept;
 
     uint16_t getFroxelIndex(size_t ix, size_t iy, size_t iz) const noexcept {
         return uint16_t(ix + (iy * mFroxelCountX) + (iz * mFroxelCountX * mFroxelCountY));
@@ -224,6 +245,7 @@ private:
     uint16_t mFroxelCountX = 0;
     uint16_t mFroxelCountY = 0;
     uint16_t mFroxelCountZ = 0;
+    uint16_t mFroxelCount = 0;
     math::uint2 mFroxelDimension = {};
 
     math::mat4f mProjection;
@@ -238,7 +260,7 @@ private:
     // needed for update()
     Viewport mViewport;
     math::float4 mParamsZ = {};
-    math::uint4 mParamsF = {};
+    math::uint3 mParamsF = {};
     float mNear = 0.0f;        // camera near
     float mZLightFar = FEngine::CONFIG_Z_LIGHT_FAR;
     float mZLightNear = FEngine::CONFIG_Z_LIGHT_NEAR;  // light near (first slice)

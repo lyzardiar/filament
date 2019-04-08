@@ -14,8 +14,7 @@
 #define SPECULAR_D_GGX_ANISOTROPIC  0
 
 // Cloth NDFs
-#define SPECULAR_D_ASHIKHMIN        0
-#define SPECULAR_D_CHARLIE          1
+#define SPECULAR_D_CHARLIE          0
 
 // Visibility functions
 #define SPECULAR_V_SMITH_GGX        0
@@ -31,11 +30,11 @@
 
 #if defined(TARGET_MOBILE)
 #define BRDF_SPECULAR_D             SPECULAR_D_GGX
-#define BRDF_SPECULAR_V             SPECULAR_V_SMITH_GGX
+#define BRDF_SPECULAR_V             SPECULAR_V_SMITH_GGX_FAST
 #define BRDF_SPECULAR_F             SPECULAR_F_SCHLICK
 #else
 #define BRDF_SPECULAR_D             SPECULAR_D_GGX
-#define BRDF_SPECULAR_V             SPECULAR_V_SMITH_GGX_FAST
+#define BRDF_SPECULAR_V             SPECULAR_V_SMITH_GGX
 #define BRDF_SPECULAR_F             SPECULAR_F_SCHLICK
 #endif
 
@@ -81,19 +80,15 @@ float D_GGX(float linearRoughness, float NoH, const vec3 h) {
 
 float D_GGX_Anisotropic(float at, float ab, float ToH, float BoH, float NoH) {
     // Burley 2012, "Physically-Based Shading at Disney"
-    float a2 = at * ab;
-    vec3 d = vec3(ab * ToH, at * BoH, a2 * NoH);
-    return saturateMediump(a2 * sq(a2 / dot(d, d)) * (1.0 / PI));
-}
 
-float D_Ashikhmin(float linearRoughness, float NoH) {
-    // Ashikhmin 2007, "Distribution-based BRDFs"
-	float a2 = linearRoughness * linearRoughness;
-	float cos2h = NoH * NoH;
-	float sin2h = max(1.0 - cos2h, 0.0078125); // 2^(-14/2), so sin2h^2 > 0 in fp16
-	float sin4h = sin2h * sin2h;
-	float cot2 = -cos2h / (a2 * sin2h);
-	return 1.0 / (PI * (4.0 * a2 + 1.0) * sin4h) * (4.0 * exp(cot2) + sin4h);
+    // The values at and ab are roughness^2, a2 is therefore roughness^4
+    // The dot product below computes roughness^8. We cannot fit in fp16 without clamping
+    // the roughness to too high values so we perform the dot product and the division in fp32
+    float a2 = at * ab;
+    HIGHP vec3 d = vec3(ab * ToH, at * BoH, a2 * NoH);
+    HIGHP float d2 = dot(d, d);
+    float b2 = a2 / d2;
+    return a2 * b2 * b2 * (1.0 / PI);
 }
 
 float D_Charlie(float linearRoughness, float NoH) {
@@ -145,8 +140,12 @@ float V_Neubelt(float NoV, float NoL) {
 
 vec3 F_Schlick(const vec3 f0, float f90, float VoH) {
     // Schlick 1994, "An Inexpensive BRDF Model for Physically-Based Rendering"
-    float f = pow5(1.0 - VoH);
-    return f + f0 * (f90 - f);
+    return f0 + (f90 - f0) * pow5(1.0 - VoH);
+}
+
+vec3 F_Schlick(const vec3 f0, float VoH) {
+    float f = pow(1.0 - VoH, 5.0);
+    return f + f0 * (1.0 - f);
 }
 
 float F_Schlick(float f0, float f90, float VoH) {
@@ -163,7 +162,7 @@ float distribution(float linearRoughness, float NoH, const vec3 h) {
 #endif
 }
 
-float visibility(float roughness, float linearRoughness, float NoV, float NoL, float LoH) {
+float visibility(float linearRoughness, float NoV, float NoL, float LoH) {
 #if BRDF_SPECULAR_V == SPECULAR_V_SMITH_GGX
     return V_SmithGGXCorrelated(linearRoughness, NoV, NoL);
 #elif BRDF_SPECULAR_V == SPECULAR_V_SMITH_GGX_FAST
@@ -174,7 +173,7 @@ float visibility(float roughness, float linearRoughness, float NoV, float NoL, f
 vec3 fresnel(const vec3 f0, float LoH) {
 #if BRDF_SPECULAR_F == SPECULAR_F_SCHLICK
 #if defined(TARGET_MOBILE)
-    return F_Schlick(f0, 1.0, LoH);
+    return F_Schlick(f0, LoH); // f90 = 1.0
 #else
     float f90 = saturate(dot(f0, vec3(50.0 * 0.33)));
     return F_Schlick(f0, f90, LoH);
@@ -210,9 +209,7 @@ float visibilityClearCoat(float roughness, float linearRoughness, float LoH) {
 }
 
 float distributionCloth(float linearRoughness, float NoH) {
-#if BRDF_CLOTH_D == SPECULAR_D_ASHIKHMIN
-    return D_Ashikhmin(linearRoughness, NoH);
-#elif BRDF_CLOTH_D == SPECULAR_D_CHARLIE
+#if BRDF_CLOTH_D == SPECULAR_D_CHARLIE
     return D_Charlie(linearRoughness, NoH);
 #endif
 }

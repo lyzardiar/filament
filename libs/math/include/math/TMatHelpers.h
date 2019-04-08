@@ -33,6 +33,7 @@
 #include <math/quat.h>
 #include <math/TVecHelpers.h>
 
+namespace filament {
 namespace math {
 namespace details {
 // -------------------------------------------------------------------------------------
@@ -432,18 +433,6 @@ public:
         return static_cast<BASE<T>&>(*this)[col][row];
     }
 
-    template <typename VEC>
-    static BASE<T> translate(const VEC& t) {
-        BASE<T> r;
-        r[BASE<T>::NUM_COLS-1] = t;
-        return r;
-    }
-
-    template <typename VEC>
-    static constexpr BASE<T> scale(const VEC& s) {
-        return BASE<T>(s);
-    }
-
     friend inline BASE<T> MATH_PURE abs(BASE<T> m) {
         for (size_t col = 0; col < BASE<T>::NUM_COLS; ++col) {
             m[col] = abs(m[col]);
@@ -460,8 +449,9 @@ public:
         static_assert(BASE<T>::NUM_ROWS == 3 || BASE<T>::NUM_ROWS == 4, "3x3 or 4x4 matrices only");
     }
 
-    template <typename A, typename VEC>
-    static BASE<T> rotate(A radian, const VEC& about) {
+    template<typename A, typename VEC,
+            typename = typename std::enable_if<std::is_arithmetic<A>::value>::type>
+    static BASE<T> rotation(A radian, const VEC& about) {
         BASE<T> r;
         T c = std::cos(radian);
         T s = std::sin(radian);
@@ -601,5 +591,6 @@ public:
 // -------------------------------------------------------------------------------------
 }  // namespace details
 }  // namespace math
+}  // namespace filament
 
 #endif  // MATH_TMATHELPERS_H_

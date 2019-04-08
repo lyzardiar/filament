@@ -57,11 +57,6 @@ void getPixelParams(const MaterialInputs material, out PixelParams pixel) {
     roughness = max(roughness, geometricRoughness);
 #endif
 
-    // Remaps the roughnes to a perceptually linear roughness (roughness^2)
-    // TODO: the base layer's roughness should not be higher than the clear coat layer's
-    pixel.roughness = roughness;
-    pixel.linearRoughness = roughness * roughness;
-
 #if defined(MATERIAL_HAS_CLEAR_COAT)
     pixel.clearCoat = material.clearCoat;
     // Clamp the clear coat roughness to avoid divisions by 0
@@ -73,13 +68,25 @@ void getPixelParams(const MaterialInputs material, out PixelParams pixel) {
     // Remap the roughness to perceptually linear roughness
     pixel.clearCoatRoughness = clearCoatRoughness;
     pixel.clearCoatLinearRoughness = clearCoatRoughness * clearCoatRoughness;
+#if defined(CLEAR_COAT_IOR_CHANGE)
     // The base layer's f0 is computed assuming an interface from air to an IOR
     // of 1.5, but the clear coat layer forms an interface from IOR 1.5 to IOR
     // 1.5. We recompute f0 by first computing its IOR, then reconverting to f0
     // by using the correct interface
     pixel.f0 = mix(pixel.f0, f0ClearCoatToSurface(pixel.f0), pixel.clearCoat);
-    // TODO: the base layer should be rougher
 #endif
+
+#if defined(MATERIAL_HAS_CLEAR_COAT_ROUGHNESS)
+    // This is a hack but it will do: the base layer must be at least as rough
+    // as the clear coat layer to take into account possible diffusion by the
+    // top layer
+    roughness = max(roughness, pixel.clearCoatRoughness);
+#endif
+#endif
+
+    // Remaps the roughness to a perceptually linear roughness (roughness^2)
+    pixel.roughness = roughness;
+    pixel.linearRoughness = roughness * roughness;
 
 #if defined(SHADING_MODEL_SUBSURFACE)
     pixel.subsurfacePower = material.subsurfacePower;

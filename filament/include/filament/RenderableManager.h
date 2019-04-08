@@ -32,7 +32,7 @@
 #include <math/mat4.h>
 #include <math/vec3.h>
 
-#include <utils/compiler.h>
+#include <type_traits>
 
 namespace filament {
 
@@ -47,7 +47,7 @@ class UTILS_PUBLIC RenderableManager : public FilamentAPI {
 
 public:
     using Instance = utils::EntityInstance<RenderableManager>;
-    using PrimitiveType = driver::PrimitiveType;
+    using PrimitiveType = backend::PrimitiveType;
 
     bool hasComponent(utils::Entity e) const noexcept;
 
@@ -83,7 +83,7 @@ public:
         Builder& castShadows(bool enable) noexcept; // false by default
         Builder& receiveShadows(bool enable) noexcept; // true by default
         Builder& skinning(size_t boneCount) noexcept; // 0 by default, 255 max
-        Builder& skinning(size_t boneCount, Bone const* transforms) noexcept;
+        Builder& skinning(size_t boneCount, Bone const* bones) noexcept;
         Builder& skinning(size_t boneCount, math::mat4f const* transforms) noexcept;
 
         // Sets an ordering index for blended primitives that all live at the same Z value.
@@ -96,12 +96,12 @@ public:
          * @param entity Entity to add the Renderable component to.
          * @return Success if the component was created successfully, Error otherwise.
          *
+         * If exceptions are disabled and an error occurs, this function is a no-op.
+         *        Success can be checked by looking at the return value.
+         *
          * If this component already exists on the given entity and the construction is successful,
          * it is first destroyed as if destroy(utils::Entity e) was called. In case of error,
          * the existing component is unmodified.
-         *
-         * @error if exceptions are disabled and an error occurs, this function is a no-op.
-         *        Success can be checked by looking at the return value.
          *
          * @exception utils::PostConditionPanic if a runtime error occurred, such as running out of
          *            memory or other resources.
@@ -137,6 +137,8 @@ public:
     bool isShadowCaster(Instance instance) const noexcept;
     bool isShadowReceiver(Instance instance) const noexcept;
 
+    // Updates the bone transforms in the range [offset, offset + boneCount).
+    // The bones must be pre-allocated using Builder::skinning().
     void setBones(Instance instance, Bone const* transforms, size_t boneCount = 1, size_t offset = 0) noexcept;
     void setBones(Instance instance, math::mat4f const* transforms, size_t boneCount = 1, size_t offset = 0) noexcept;
 

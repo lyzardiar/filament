@@ -14,14 +14,9 @@
  * limitations under the License.
  */
 
-#include <memory>
-#include <map>
-#include <string>
-#include <vector>
-
-#include <getopt/getopt.h>
-
-#include <utils/Path.h>
+#include "app/Config.h"
+#include "app/FilamentApp.h"
+#include "app/MeshAssimp.h"
 
 #include <filament/Engine.h>
 #include <filament/LightManager.h>
@@ -32,21 +27,25 @@
 #include <filament/Scene.h>
 #include <filament/Texture.h>
 
+#include <filamat/MaterialBuilder.h>
+
+#include <utils/Path.h>
+#include <utils/EntityManager.h>
+
 #include <math/mat3.h>
 #include <math/mat4.h>
 #include <math/vec3.h>
 
-#include "app/Config.h"
-#include "app/FilamentApp.h"
-#include "app/MeshAssimp.h"
+#include <getopt/getopt.h>
 
 #include <stb_image.h>
 
-#include <utils/EntityManager.h>
+#include <memory>
+#include <map>
+#include <string>
+#include <vector>
 
-#include <filamat/MaterialBuilder.h>
-
-using namespace math;
+using namespace filament::math;
 using namespace filament;
 using namespace filamat;
 using namespace utils;
@@ -185,11 +184,11 @@ void loadTexture(Engine* engine, const std::string& filePath, Texture** map, boo
                         .width(uint32_t(w))
                         .height(uint32_t(h))
                         .levels(0xff)
-                        .format(sRGB ? driver::TextureFormat::SRGB8 : driver::TextureFormat::RGB8)
+                        .format(sRGB ? Texture::InternalFormat::SRGB8 : Texture::InternalFormat::RGB8)
                         .build(*engine);
                 Texture::PixelBufferDescriptor buffer(data, size_t(w * h * 3),
                         Texture::Format::RGB, Texture::Type::UBYTE,
-                        (driver::BufferDescriptor::Callback) &stbi_image_free);
+                        (Texture::PixelBufferDescriptor::Callback) &stbi_image_free);
                 (*map)->setImage(*engine, 0, std::move(buffer));
                 (*map)->generateMipmaps(*engine);
             } else {
@@ -281,21 +280,12 @@ static void setup(Engine* engine, View* view, Scene* scene) {
     }
     shader += "}\n";
 
+    MaterialBuilder::init();
     MaterialBuilder builder = MaterialBuilder()
             .name("DefaultMaterial")
-            .set(Property::BASE_COLOR)
-            .set(Property::METALLIC)
-            .set(Property::ROUGHNESS)
-            .set(Property::AMBIENT_OCCLUSION)
             .material(shader.c_str())
             .shading(Shading::LIT);
 
-    if (g_pbrConfig.clearCoat) {
-        builder.set(Property::CLEAR_COAT);
-    }
-    if (g_pbrConfig.anisotropy) {
-        builder.set(Property::ANISOTROPY);
-    }
     if (hasBaseColorMap) {
         builder
             .require(VertexAttribute::UV0)
@@ -318,7 +308,6 @@ static void setup(Engine* engine, View* view, Scene* scene) {
     }
     if (hasNormalMap) {
         builder
-            .set(Property::NORMAL)
             .require(VertexAttribute::UV0)
             .parameter(MaterialBuilder::SamplerType::SAMPLER_2D, "normalMap");
     }
@@ -389,7 +378,7 @@ int main(int argc, char* argv[]) {
     for (int i = option_index; i < argc; i++) {
         utils::Path filename = argv[i];
         if (!filename.exists()) {
-            std::cerr << "file " << argv[option_index] << " not found!" << std::endl;
+            std::cerr << "file " << argv[i] << " not found!" << std::endl;
             return 1;
         }
         g_filenames.push_back(filename);
